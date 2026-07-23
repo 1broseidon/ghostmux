@@ -1,21 +1,7 @@
-// ghostmux: the coordination layer for the ghostty/tmux boundary.
-//
-// The problem: ghostty and tmux each stop dead at the other's boundary. tmux
-// can't reach up (spawn terminal windows, yield keys, see splits); ghostty
-// can't reach down (sessions, persistence, remote). Every feature here must
-// span that boundary — anything tmux or ghostty could do alone is out of
-// scope, demoted to a convenience at best.
-//
-// Boundary commands:
-//   - install/uninstall: matched-pair config for both sides of the seam
-//     (one nav keymap across ghostty splits, tmux panes, vim windows)
-//   - restore: reopen a ghostty window for every orphaned tmux session
-//   - up -w:   ghostty window attached to a named session (create on demand)
-//   - doctor:  diagnose the seam (terminfo, wiring, versions)
-//
-// Conveniences (fail the purist test, cost nothing):
-//   - up (in place), ls
-package main
+// Package wiring holds every ghostmux command that isn't the rail:
+// install/uninstall/ambient/shell/doctor/up/restore/ls, the config snippets
+// they write, and the hub launcher.
+package wiring
 
 import (
 	"fmt"
@@ -27,78 +13,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
 const (
 	markerBegin = "# >>> ghostmux >>>"
 	markerEnd   = "# <<< ghostmux <<<"
 )
-
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "install":
-		err = cmdInstall()
-	case "uninstall":
-		err = cmdUninstall()
-	case "up":
-		err = cmdUp(os.Args[2:])
-	case "restore":
-		err = cmdRestore()
-	case "rail":
-		err = cmdRail(os.Args[2:])
-	case "shell":
-		err = cmdShell()
-	case "ambient":
-		err = cmdAmbient(os.Args[2:])
-	case "ls":
-		err = cmdLs()
-	case "doctor":
-		err = cmdDoctor()
-	case "help", "-h", "--help":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "ghostmux: unknown command %q\n\n", os.Args[1])
-		usage()
-		os.Exit(2)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ghostmux:", err)
-		os.Exit(1)
-	}
-}
-
-func usage() {
-	fmt.Print(`ghostmux — the coordination layer for the ghostty/tmux boundary
-
-Your terminal and your multiplexer each stop dead at the other's boundary;
-your workflow doesn't. Everything here spans that boundary.
-
-boundary:
-  ghostmux rail dock        persistent left-pane navigator: session/window/
-                            pane tree, live attention gutter, enter to jump
-  ghostmux ambient on|off   every ghostty surface becomes a
-                            persistent tmux session; reopening ghostty
-                            unfolds your whole workspace, zero typing
-  ghostmux install          matched-pair nav config: one keymap across
-                            ghostty splits, tmux panes, and vim windows
-  ghostmux uninstall        remove the wiring (snippets stay in ~/.config/ghostmux)
-  ghostmux restore          reopen a ghostty window for every orphaned
-                            (unattached) tmux session
-  ghostmux up -w <name>     ghostty window attached to session <name>,
-                            created on demand
-  ghostmux doctor           diagnose the seam: terminfo, wiring, versions
-  ghostmux shell            what ambient mode runs per surface (internal)
-
-convenience:
-  ghostmux up <name> [dir]  attach in place (switches client inside tmux)
-  ghostmux ls               list tmux sessions
-`)
-}
 
 // ---- paths ----
 
@@ -157,7 +79,7 @@ bind-key C-l send-keys C-l
 
 // ---- install / uninstall ----
 
-func cmdInstall() error {
+func CmdInstall() error {
 	if err := os.MkdirAll(snippetDir(), 0o755); err != nil {
 		return err
 	}
@@ -190,7 +112,7 @@ func cmdInstall() error {
 	return nil
 }
 
-func cmdUninstall() error {
+func CmdUninstall() error {
 	for _, f := range []string{ghosttyConfig(), tmuxConfig()} {
 		changed, err := removeBlock(f)
 		if err != nil {
@@ -259,7 +181,7 @@ func removeBlock(path string) (bool, error) {
 
 // ---- sessions ----
 
-func cmdUp(args []string) error {
+func CmdUp(args []string) error {
 	newWindow := false
 	rest := args[:0:0]
 	for _, a := range args {
@@ -287,12 +209,12 @@ func cmdUp(args []string) error {
 
 	// Already inside tmux: never nest — create if needed, then switch this client.
 	if os.Getenv("TMUX") != "" {
-		if exec.Command("tmux", "has-session", "-t", "="+name).Run() != nil {
-			if err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir).Run(); err != nil {
+		if tmux.Run("has-session", "-t", "="+name) != nil {
+			if err := tmux.Run("new-session", "-d", "-s", name, "-c", dir); err != nil {
 				return fmt.Errorf("tmux new-session: %w", err)
 			}
 		}
-		if err := exec.Command("tmux", "switch-client", "-t", "="+name).Run(); err != nil {
+		if err := tmux.Run("switch-client", "-t", "="+name); err != nil {
 			return fmt.Errorf("tmux switch-client: %w", err)
 		}
 		return nil
@@ -327,21 +249,20 @@ func isTTY(f *os.File) bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
-// cmdRestore reopens a ghostty window for every unattached tmux session.
+// CmdRestore reopens a ghostty window for every unattached tmux session.
 // Stateless: tmux owns session truth; ghostmux only does the half tmux
 // can't — opening terminal windows. After a ghostty quit/crash the tmux
 // server still holds every session; restore brings the windows back.
 // (Across reboots, compose with tmux-resurrect: it restores the sessions,
 // ghostmux restores the windows.)
-func cmdRestore() error {
-	out, err := exec.Command("tmux", "list-sessions",
-		"-F", "#{session_name}\t#{session_attached}").Output()
+func CmdRestore() error {
+	out, err := tmux.Runner("list-sessions", "-F", "#{session_name}\t#{session_attached}")
 	if err != nil {
 		fmt.Println("no tmux server running — nothing to restore")
 		return nil
 	}
 	restored := 0
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		name, attached, ok := strings.Cut(line, "\t")
 		if !ok || attached != "0" {
 			continue
@@ -361,14 +282,14 @@ func cmdRestore() error {
 	return nil
 }
 
-func cmdLs() error {
-	out, err := exec.Command("tmux", "list-sessions",
-		"-F", "#{session_name}\t#{session_windows} windows\t#{?session_attached,attached,detached}\t#{session_path}").Output()
+func CmdLs() error {
+	out, err := tmux.Runner("list-sessions",
+		"-F", "#{session_name}\t#{session_windows} windows\t#{?session_attached,attached,detached}\t#{session_path}")
 	if err != nil {
 		fmt.Println("no tmux sessions")
 		return nil
 	}
-	fmt.Print(string(out))
+	fmt.Print(out)
 	return nil
 }
 
@@ -376,11 +297,11 @@ func cmdLs() error {
 
 const gmPrefix = "gm-"
 
-// cmdShell is what `command = ghostmux shell` runs in every new ghostty
+// CmdShell is what `command = ghostmux shell` runs in every new ghostty
 // surface. It reclaims the lowest-numbered orphaned gm-* session or creates
 // a fresh one, and — on a cold start with multiple orphans — unfolds the
 // rest of the workspace by opening a ghostty window per remaining orphan.
-func cmdShell() error {
+func CmdShell() error {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
@@ -437,13 +358,12 @@ func cmdShell() error {
 // gmSessions returns orphaned gm-* session names sorted by index, and how
 // many gm-* sessions currently have a client attached.
 func gmSessions() (orphans []string, attached int) {
-	out, err := exec.Command("tmux", "list-sessions",
-		"-F", "#{session_name}\t#{session_attached}").Output()
+	out, err := tmux.Runner("list-sessions", "-F", "#{session_name}\t#{session_attached}")
 	if err != nil {
 		return nil, 0
 	}
 	idx := []int{}
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		name, att, ok := strings.Cut(line, "\t")
 		if !ok || !strings.HasPrefix(name, gmPrefix) {
 			continue
@@ -467,8 +387,8 @@ func gmSessions() (orphans []string, attached int) {
 
 func freeGMName() string {
 	used := map[string]bool{}
-	out, _ := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+	out := tmux.Output("list-sessions", "-F", "#{session_name}")
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		used[line] = true
 	}
 	for n := 0; ; n++ {
@@ -496,17 +416,16 @@ func acquireLock() (*os.File, error) {
 
 func waitAttached(name string) {
 	for range 20 {
-		out, err := exec.Command("tmux", "display-message", "-p",
-			"-t", "="+name, "#{session_attached}").Output()
-		if err == nil && strings.TrimSpace(string(out)) != "0" {
+		out, err := tmux.Runner("display-message", "-p", "-t", "="+name, "#{session_attached}")
+		if err == nil && strings.TrimSpace(out) != "0" {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-// cmdAmbient toggles `command = ghostmux shell` in the ghostty snippet.
-func cmdAmbient(args []string) error {
+// CmdAmbient toggles `command = ghostmux shell` in the ghostty snippet.
+func CmdAmbient(args []string) error {
 	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
 		return fmt.Errorf("usage: ghostmux ambient on|off")
 	}
@@ -548,9 +467,20 @@ command = %s shell
 
 func ambientOn() bool { return fileContains(ghosttySnippet(), "\ncommand = ") }
 
+// ---- hub ----
+
+// CmdHub is the single command that creates (or attaches to) the dedicated
+// `hub` session: the rail+viewport layout, built by ghostmux, never by
+// claiming an existing pane. See docs/SPEC.md §2 (Task 3).
+func CmdHub(args []string) error {
+	fmt.Fprintln(os.Stderr, "hub: not yet implemented")
+	os.Exit(1)
+	return nil
+}
+
 // ---- doctor ----
 
-func cmdDoctor() error {
+func CmdDoctor() error {
 	ok := true
 	check := func(label string, pass bool, detail string) {
 		mark := "ok"
@@ -568,7 +498,7 @@ func cmdDoctor() error {
 		fmt.Println("       swallow keys in some cases (fixed upstream in 1.3); upgrade if nav misbehaves")
 	}
 
-	tmuxVer := firstLine(runOut("tmux", "-V"))
+	tmuxVer := firstLine(tmux.Output("-V"))
 	check("tmux", tmuxVer != "", tmuxVer)
 
 	terminfo := exec.Command("infocmp", "-x", "xterm-ghostty").Run() == nil
