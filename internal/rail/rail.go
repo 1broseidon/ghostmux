@@ -87,17 +87,24 @@ func CmdRail(args []string) error {
 // way.
 func cmdOnce(args []string) error {
 	query := ""
+	marks := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--filter" && i+1 < len(args) {
+		switch {
+		case args[i] == "--filter" && i+1 < len(args):
 			query = args[i+1]
 			i++
+		case args[i] == "--marks":
+			marks = true
 		}
 	}
 	for _, r := range railRows("", viewState{}) {
-		if query == "" {
-			fmt.Println(r.plain())
-		} else {
+		switch {
+		case marks:
+			fmt.Println(r.marks())
+		case query != "":
 			fmt.Println(r.plainFiltered(query))
+		default:
+			fmt.Println(r.plain())
 		}
 	}
 	return nil

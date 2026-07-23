@@ -15,8 +15,42 @@ half-works, terminfo hacks, and `command=` one-liners with race conditions.
 ghostmux owns the seam. **The purist test is the admission criterion: a
 feature ships only if neither tmux nor ghostty could do it alone.**
 
+## The hub
+
+`ghostmux hub` is the entry point. Run it once, stay there. It creates (or
+attaches to) a dedicated session named `hub`: a persistent rail pane on the
+left (30 columns) and a viewport pane on the right, both built and owned by
+ghostmux — never by claiming a pane you were already using.
+
+- **The rail never moves.** It's a live tree of every tmux session and
+  window (excluding `hub` itself), with a gutter that shows what needs your
+  attention. Pressing `↵` on a row doesn't move the rail — it re-points the
+  viewport pane at that session/window instead.
+- **`prefix None` on the hub session.** The rail's own keys (`n`, `x`, `d`,
+  `q`, `↵`, `/`, `tab`, ...) replace every prefix command you'd reach for
+  there, so the hub's outer tmux needs no prefix of its own — `ctrl+b` in
+  the viewport passes straight through to the inner session's tmux
+  (single prefix everywhere, no `ctrl+b ctrl+b`). Running `rail` by hand
+  outside the hub keeps your normal prefix; the help popup documents
+  `ctrl+b ctrl+b` for that case.
+- **Mouse click-to-focus.** The hub sets `mouse on` session-scoped, so
+  clicking between the rail and the viewport focuses them, regardless of
+  your own tmux mouse setting elsewhere.
+- **Keymap:** `j/k`/`↓↑` move · `g`/`G` first/last · `↵` view in viewport ·
+  `tab` collapse/expand · `n` new session · `a` new agent session
+  (`gm-agent-NN`) · `x` kill (`y`/`n` confirm) · `/` filter · `r` refresh ·
+  `d` detach the viewport (goes idle) · `?` help popup · `q` quit (tears
+  down the hub).
+- **Gutter legend:** `●` bell · `✓` done (the foreground command exited back
+  to a shell while you weren't looking) · `~` activity · `▸` currently in
+  the viewport. Highest-priority mark wins when a session aggregates its
+  windows.
+
 ## Boundary commands
 
+- **`hub`** — see [The hub](#the-hub) above: the coordination surface for a
+  fleet of sessions, rendered through nested clients — tmux alone gives you
+  `choose-tree` (modal, blocking), ghostty alone gives you nothing.
 - **`ambient on|off`** — the wow switch. Every new ghostty surface becomes a
   persistent tmux session (`gm-*`), no typing ever. Quit ghostty with four
   windows of running processes; open ghostty again and the first window
@@ -64,8 +98,25 @@ tmux >= 3.2, Linux/GTK. Build: `go build -o ghostmux .`
 
 ## Roadmap
 
-Phase 2 formalizes the boundary tool (repo shape, seam-correct ambient
-`shell` mode if it proves out). Phase 3, after ghostty 1.4 (~Sept 2026):
-a Go tmux control-mode (`-CC`) client library — no Go implementation
-exists — and a bridge to ghostty's scripting API / native tmux control
-mode, where tmux panes become GPU-rendered native splits.
+Phase 2 shipped the hub: rail + viewport, event-driven refresh, the
+attention gutter. Deferred to phase 3 (post ghostty 1.4, ~Sept 2026):
+
+- Go tmux control-mode (`-CC`) client library; event-driven refresh then
+  migrates off hooks/wait-for.
+- Ghostty scripting-API bridge (native splits for panes, window focus).
+- termtile X11 focus integration (D8 — seam reserved as `clientTTY` data
+  only).
+- Real OSC 133 prompt-mark semantics for ✓ (replaces D5's command-transition
+  heuristic).
+- tmux-resurrect composition beyond what `restore` already does.
+
+Cut, not deferred — rejected:
+
+- Mouse support inside the rail TUI itself (mouse-first applies to the
+  viewport; rail is keyboard-native).
+- Collapse-state persistence across rail restarts.
+- Custom theming of the outer/inner tmux status bars (user's tmux config
+  territory; fails the purist test).
+- Activity pulse animation (mockup marks it optional; skip).
+- Pane-depth (depth 2) rows in the tree — sessions and windows only.
+- Any config file for ghostmux itself.

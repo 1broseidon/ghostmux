@@ -75,6 +75,30 @@ func (r railRow) plainFiltered(query string) string {
 	return "·" + r.plain()
 }
 
+// marks is rail once --marks's machine format for one row:
+// "SESS|WIN|bell,done,act,view" — WIN is empty for session rows, and the
+// flags list only the marks that are set (empty string if none).
+func (r railRow) marks() string {
+	win := ""
+	if r.depth == 1 {
+		win = r.window
+	}
+	var flags []string
+	if r.bell {
+		flags = append(flags, "bell")
+	}
+	if r.done {
+		flags = append(flags, "done")
+	}
+	if r.act {
+		flags = append(flags, "act")
+	}
+	if r.inView {
+		flags = append(flags, "view")
+	}
+	return fmt.Sprintf("%s|%s|%s", r.sess, win, strings.Join(flags, ","))
+}
+
 // railRows is the live-tmux entry point: fetch the fleet and build the tree.
 func railRows(hub string, v viewState) []railRow {
 	return buildRows(hub, v, tmux.Sessions(), tmux.Windows())

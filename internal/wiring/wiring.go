@@ -523,6 +523,10 @@ func buildHub(exe string) error {
 	// 'hub' still resolves exactly since the session exists.)
 	tmux.Run("set-option", "-t", "hub", "prefix", "None")
 	tmux.Run("set-option", "-t", "hub", "prefix2", "None")
+	// Session-scoped mouse on: clicking between the rail and viewport panes
+	// focuses them without needing prefix navigation, regardless of the
+	// user's own tmux mouse setting (which stays untouched everywhere else).
+	tmux.Run("set-option", "-t", "hub", "mouse", "on")
 
 	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}")
 	if len(panes) == 0 {
@@ -625,10 +629,60 @@ func CmdDoctor() error {
 	}
 	fmt.Printf("  [--] %-28s %s\n", "ambient mode", ambient)
 
+	if tmux.Run("has-session", "-t", "=hub") == nil {
+		checkHub(check)
+	}
+	checkStaleHooks(check)
+
 	if !ok {
 		fmt.Println("\nrun `ghostmux install` to wire configs")
 	}
 	return nil
+}
+
+// checkHub runs the hub-specific checks (D1, Task 3) when a hub session
+// exists: layout (2 panes, rail pane 30 wide), prefix None, mouse on.
+func checkHub(check func(label string, pass bool, detail string)) {
+	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}\t#{pane_width}")
+	railWidth := -1
+	npanes := 0
+	if !(len(panes) == 1 && panes[0] == "") {
+		npanes = len(panes)
+		if npanes > 0 {
+			if f := strings.SplitN(panes[0], "\t", 2); len(f) == 2 {
+				if w, err := strconv.Atoi(f[1]); err == nil {
+					railWidth = w
+				}
+			}
+		}
+	}
+	check("hub layout", npanes == 2, fmt.Sprintf("%d panes", npanes))
+	check("hub rail width", railWidth == 30, fmt.Sprintf("%d", railWidth))
+
+	prefix := strings.TrimSpace(tmux.Output("show-options", "-t", "hub", "prefix"))
+	check("hub prefix", strings.Contains(prefix, "None"), prefix)
+
+	mouse := strings.TrimSpace(tmux.Output("show-options", "-t", "hub", "mouse"))
+	check("hub mouse", strings.Contains(mouse, "on"), mouse)
+}
+
+// checkStaleHooks warns when ghostmux's [133] refresh hooks (D6) are still
+// installed but no rail process is running anywhere (pgrep-free: no pane
+// anywhere has pane_current_command == the ghostmux binary's own name).
+func checkStaleHooks(check func(label string, pass bool, detail string)) {
+	hooks := tmux.Output("show-hooks", "-g")
+	if !strings.Contains(hooks, "[133]") {
+		return // nothing installed, nothing to warn about
+	}
+	railRunning := false
+	for _, cmd := range tmux.Lines("list-panes", "-a", "-F", "#{pane_current_command}") {
+		if cmd == "ghostmux" {
+			railRunning = true
+			break
+		}
+	}
+	check("stale ghostmux hooks", railRunning,
+		map[bool]string{true: "", false: "run `ghostmux hub` or `tmux set-hook -gu <name>[133]`"}[railRunning])
 }
 
 func runOut(name string, args ...string) string {
