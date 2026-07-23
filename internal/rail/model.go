@@ -50,6 +50,8 @@ type railModel struct {
 
 	helpView bool   // `?` toggles the in-pane help page
 	selfPane string // the rail's own pane id, for width self-enforcement
+
+	lastViewed string // "sess:win" the cursor last auto-followed the viewport to
 }
 
 func railTicker() tea.Cmd {
@@ -408,7 +410,51 @@ func (m *railModel) refresh() {
 	if m.done != nil {
 		m.done.observe(windows, m.hub, m.suppressDone)
 	}
+	// Follow the viewport's client: ctrl+b navigation inside the inner
+	// session changes its active window — the lock tracks it so ▸, heal,
+	// and the cursor all point at what the viewport actually shows.
+	if m.vp.lockSess != "" {
+		for _, w := range windows {
+			if w.Session == m.vp.lockSess && w.Active {
+				m.vp.lockWin = w.Index
+				break
+			}
+		}
+	}
 	m.rows = buildRows(m.hub, m.viewState(), sessions, windows)
+	m.followViewport()
+}
+
+// followViewport moves the rail cursor to the row the viewport is showing,
+// once per viewed-window change — so ctrl+b navigation in the viewport
+// scrolls/highlights the rail live, while leaving the cursor alone when the
+// user is browsing other rows with j/k.
+func (m *railModel) followViewport() {
+	if m.vp.lockSess == "" {
+		m.lastViewed = ""
+		return
+	}
+	key := m.vp.lockSess + ":" + m.vp.lockWin
+	if key == m.lastViewed {
+		return
+	}
+	m.lastViewed = key
+	best := -1
+	for i, r := range m.visible() {
+		if r.sess != m.vp.lockSess {
+			continue
+		}
+		if r.flat || (r.depth == 1 && r.window == m.vp.lockWin) {
+			best = i
+			break
+		}
+		if r.depth == 0 {
+			best = i // session row stands in when its windows are collapsed
+		}
+	}
+	if best >= 0 {
+		m.cursor = best
+	}
 }
 
 // viewState is the viewport's current lock, used for inView marks and done

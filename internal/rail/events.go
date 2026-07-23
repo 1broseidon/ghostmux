@@ -30,6 +30,9 @@ var refreshHooks = []string{
 	"window-linked",
 	"window-unlinked",
 	"window-renamed",
+	// fires when a session's current window changes — this is how the rail
+	// live-tracks ctrl+b navigation happening inside the viewport's client
+	"session-window-changed",
 }
 
 // refreshMsg is posted by the wait-for listener when any refresh hook fires.
