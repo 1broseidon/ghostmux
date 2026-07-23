@@ -1,19 +1,40 @@
 package rail
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
+	"github.com/1broseidon/ghostmux/internal/wiring"
 )
 
 type railTick time.Time
 type blinkMsg time.Time
 
+// helpDoneMsg reports the outcome of the `?` help popup (Task 10): a non-zero
+// exit from `tmux display-popup` (e.g. run outside tmux, or the tmux version
+// lacks it) falls back to a full-rail help page.
+type helpDoneMsg struct{ err error }
+
+// mode selects which keymap Update() dispatches to and what the hint line
+// shows (Tasks 8-9).
+type mode int
+
+const (
+	modeNormal mode = iota
+	modeFilter
+	modeCreate
+	modeKillConfirm
+)
+
 type railModel struct {
 	rows         []railRow
-	cursor       int
+	cursor       int // index into visible() rows, not raw rows
 	height       int
 	hub          string          // session the rail lives in — excluded from the tree
 	vp           viewport        // right-hand pane where selections render
@@ -22,6 +43,18 @@ type railModel struct {
 	attached     map[string]bool // session name → attached elsewhere
 	blinking     bool            // 400ms blink timer running (D7)
 	blinkPhase   int             // bell blink phase, mod 3 (glyph hidden on phase 2)
+
+	collapsed map[string]bool // session name → collapsed in the rail (Task 7)
+
+	mode        mode
+	filterQuery string // active filter substring (Task 8)
+	createInput string // in-progress `n` prompt text (Task 9)
+	killTarget  string // session pending `x` confirmation (Task 9)
+
+	errMsg   string    // last action error, shown on the hint line
+	errUntil time.Time // errMsg clears once time.Now() passes this
+
+	helpFallback bool // display-popup failed: render the full-rail help page (Task 10)
 }
 
 func railTicker() tea.Cmd {
@@ -36,6 +69,9 @@ func blinkTicker() tea.Cmd {
 func (m railModel) Init() tea.Cmd { return railTicker() }
 
 func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.collapsed == nil {
+		m.collapsed = map[string]bool{}
+	}
 	switch msg := msg.(type) {
 	case railTick:
 		m.refresh()
@@ -56,41 +92,261 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.blinkPhase = (m.blinkPhase + 1) % 3
 		return m, blinkTicker()
+	case helpDoneMsg:
+		if msg.err != nil {
+			m.helpFallback = true
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
-		case "j", "down":
-			m.cursor++
-			m.clamp()
-		case "k", "up":
-			m.cursor--
-			m.clamp()
-		case "g":
-			m.cursor = 0
-		case "G":
-			m.cursor = len(m.rows) - 1
-		case "r":
-			m.refresh()
-			m.clamp()
-			return m, m.maybeBlink()
-		case "enter":
-			if m.cursor < len(m.rows) {
-				r := m.rows[m.cursor]
-				m.clearViewedDone(r)
-				m.vp.point(r.sess, r.window)
-			}
-			m.refresh()
-		case "d":
-			m.vp.idle()
-			m.vp.detached = true
-			m.refresh()
+		}
+		switch m.mode {
+		case modeFilter:
+			return m.updateFilterKey(msg)
+		case modeCreate:
+			return m.updateCreateKey(msg)
+		case modeKillConfirm:
+			return m.updateKillConfirmKey(msg)
+		default:
+			return m.updateNormalKey(msg)
 		}
 	}
 	return m, nil
+}
+
+// visible returns the current tree with collapse applied — what the cursor
+// walks and the View renders (Task 7).
+func (m railModel) visible() []railRow {
+	return visibleRows(m.rows, m.collapsed)
+}
+
+// updateNormalKey handles every key in the default mode.
+func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "j", "down":
+		m.moveCursor(1)
+	case "k", "up":
+		m.moveCursor(-1)
+	case "g":
+		m.cursor = 0
+	case "G":
+		m.cursor = len(m.visible()) - 1
+		m.clamp()
+	case "r":
+		m.refresh()
+		m.clamp()
+		return m, m.maybeBlink()
+	case "enter":
+		if vis := m.visible(); m.cursor < len(vis) {
+			r := vis[m.cursor]
+			m.clearViewedDone(r)
+			m.vp.point(r.sess, r.window)
+		}
+		m.refresh()
+	case "tab":
+		if vis := m.visible(); m.cursor < len(vis) {
+			sess := vis[m.cursor].sess
+			m.collapsed[sess] = !m.collapsed[sess]
+			m.clamp()
+		}
+	case "d":
+		m.vp.idle()
+		m.vp.detached = true
+		m.refresh()
+	case "n":
+		m.mode = modeCreate
+		m.createInput = ""
+		m.errMsg = ""
+	case "a":
+		if err := m.agentSession(); err != nil {
+			m.flashError(err)
+		}
+	case "x":
+		if vis := m.visible(); m.cursor < len(vis) {
+			m.mode = modeKillConfirm
+			m.killTarget = vis[m.cursor].sess
+			m.errMsg = ""
+		}
+	case "/":
+		m.mode = modeFilter
+		m.errMsg = ""
+	case "esc":
+		if m.filterQuery != "" {
+			m.filterQuery = ""
+			m.clamp()
+		}
+	case "?":
+		if m.helpFallback {
+			m.helpFallback = false
+			return m, nil
+		}
+		return m, showHelp()
+	}
+	return m, nil
+}
+
+// updateFilterKey handles keys while typing a filter query (`/`, Task 8).
+func (m railModel) updateFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filterQuery = ""
+		m.mode = modeNormal
+		m.clamp()
+	case "enter":
+		m.mode = modeNormal // keeps the filter active; second esc clears it
+		m.clamp()
+	case "backspace":
+		if n := len([]rune(m.filterQuery)); n > 0 {
+			r := []rune(m.filterQuery)
+			m.filterQuery = string(r[:n-1])
+		}
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.filterQuery += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+// updateCreateKey handles keys while typing a new-session name (`n`, Task 9).
+func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.createInput = ""
+	case "enter":
+		name := m.createInput
+		m.mode = modeNormal
+		m.createInput = ""
+		if err := m.createSession(name); err != nil {
+			m.flashError(err)
+		}
+	case "backspace":
+		if n := len([]rune(m.createInput)); n > 0 {
+			r := []rune(m.createInput)
+			m.createInput = string(r[:n-1])
+		}
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.createInput += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+// updateKillConfirmKey handles the y/n confirmation after `x` (Task 9).
+func (m railModel) updateKillConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y":
+		target := m.killTarget
+		m.mode = modeNormal
+		m.killTarget = ""
+		if err := m.killSession(target); err != nil {
+			m.flashError(err)
+		}
+	case "n", "esc":
+		m.mode = modeNormal
+		m.killTarget = ""
+	}
+	return m, nil
+}
+
+// moveCursor steps the cursor by step (±1) over the visible rows, skipping
+// rows dimmed by an active filter (Task 8). It stays put if no matching row
+// exists in that direction.
+func (m *railModel) moveCursor(step int) {
+	vis := m.visible()
+	n := len(vis)
+	if n == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= n {
+		m.cursor = n - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	c := m.cursor
+	for {
+		nc := c + step
+		if nc < 0 || nc >= n {
+			return // no matching row that direction: stay put
+		}
+		c = nc
+		if m.filterQuery == "" || matchesFilter(vis[c], m.filterQuery) {
+			m.cursor = c
+			return
+		}
+	}
+}
+
+// flashError records an action error for the hint-line flash (3s, Task 9).
+func (m *railModel) flashError(err error) {
+	m.errMsg = err.Error()
+	m.errUntil = time.Now().Add(3 * time.Second)
+}
+
+// errorActive reports whether the error flash is still within its window.
+func (m railModel) errorActive() bool {
+	return m.errMsg != "" && time.Now().Before(m.errUntil)
+}
+
+// createSession creates a plain tmux session and points the viewport at it
+// (Task 9). Exported behavior via the `n` key.
+func (m *railModel) createSession(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("name required")
+	}
+	dir, err := os.UserHomeDir()
+	if err != nil || dir == "" {
+		dir = "~"
+	}
+	if err := tmux.Run("new-session", "-d", "-s", name, "-c", dir); err != nil {
+		return err
+	}
+	m.refresh()
+	m.vp.point(name, "")
+	m.refresh()
+	return nil
+}
+
+// agentSession creates the lowest-free gm-agent-NN session with no prompt and
+// points the viewport at it (Task 9, `a` key).
+func (m *railModel) agentSession() error {
+	name := wiring.FreeName("gm-agent-", "%02d")
+	return m.createSession(name)
+}
+
+// killSession kills a session by name; if it held the viewport lock, the
+// viewport goes idle (Task 9, `x` key).
+func (m *railModel) killSession(name string) error {
+	if err := tmux.Run("kill-session", "-t", "="+name); err != nil {
+		return err
+	}
+	if m.vp.lockSess == name {
+		m.vp.idle()
+	}
+	m.refresh()
+	return nil
+}
+
+// showHelp runs the `?` popup out-of-band: `tmux display-popup` running
+// `rail help`. A non-zero exit (no tmux, old tmux, popup denied) reports
+// helpDoneMsg{err!=nil} so Update() falls back to the in-rail help page.
+func showHelp() tea.Cmd {
+	return func() tea.Msg {
+		exe := selfExe()
+		err := exec.Command("tmux", tmux.Argv("display-popup", "-E", "-w", "58", "-h", "24", exe+" rail help")...).Run()
+		return helpDoneMsg{err: err}
+	}
 }
 
 // refresh reloads the fleet, runs done-tracking, and rebuilds the rows. It is
@@ -178,8 +434,9 @@ func attachedMap(sessions []tmux.Session) map[string]bool {
 }
 
 func (m *railModel) clamp() {
-	if m.cursor >= len(m.rows) {
-		m.cursor = len(m.rows) - 1
+	n := len(m.visible())
+	if m.cursor >= n {
+		m.cursor = n - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0

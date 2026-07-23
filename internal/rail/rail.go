@@ -2,9 +2,11 @@
 // Ambient, glanceable state — the anti-choose-tree: always visible, live
 // attention gutter (bell/activity), enter to jump anywhere.
 //
-//	ghostmux rail        run the TUI in the current pane (inside tmux)
-//	ghostmux rail once   print one frame and exit (debugging / agents)
-//	ghostmux rail idle    render the viewport idle placeholder (internal)
+//	ghostmux rail                run the TUI in the current pane (inside tmux)
+//	ghostmux rail once           print one frame and exit (debugging / agents)
+//	ghostmux rail once --filter  print one frame with filter-dimmed rows
+//	ghostmux rail idle           render the viewport idle placeholder (internal)
+//	ghostmux rail help           print the keymap; used by the `?` popup
 package rail
 
 import (
@@ -26,12 +28,11 @@ func CmdRail(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "once":
-			for _, r := range railRows("", viewState{}) {
-				fmt.Println(r.plain())
-			}
-			return nil
+			return cmdOnce(args[1:])
 		case "idle":
 			return cmdIdle()
+		case "help":
+			return cmdHelp()
 		}
 	}
 	if os.Getenv("TMUX") == "" {
@@ -77,6 +78,29 @@ func CmdRail(args []string) error {
 		tmux.Run("kill-session", "-t", "=hub")
 	}
 	return err
+}
+
+// cmdOnce is `ghostmux rail once [--filter q]`: one plain frame and exit,
+// the headless acceptance/debugging entry point (Task 8). Plain mode never
+// touches lipgloss/color — only `--filter` changes the output, by prefixing
+// non-matching rows with "·"; row order and positions are unchanged either
+// way.
+func cmdOnce(args []string) error {
+	query := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--filter" && i+1 < len(args) {
+			query = args[i+1]
+			i++
+		}
+	}
+	for _, r := range railRows("", viewState{}) {
+		if query == "" {
+			fmt.Println(r.plain())
+		} else {
+			fmt.Println(r.plainFiltered(query))
+		}
+	}
+	return nil
 }
 
 // selfExe resolves this binary's path for spawning subcommands (rail idle).

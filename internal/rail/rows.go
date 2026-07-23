@@ -11,16 +11,17 @@ import (
 // attention marks are booleans; the 2-char gutter is derived from them by
 // priority (bell > done > activity > in-viewport).
 type railRow struct {
-	depth    int // 0 session, 1 window
-	label    string
-	sess     string
-	window   string // window index for depth-1
-	active   bool   // tmux's current window of its session
-	attached bool   // session attached by an outside client (session rows)
-	bell     bool   // ● window_bell_flag
-	done     bool   // ✓ @ghostmux_done (D5)
-	act      bool   // ~ window_activity_flag
-	inView   bool   // ▸ locked in the viewport
+	depth     int // 0 session, 1 window
+	label     string
+	sess      string
+	window    string // window index for depth-1
+	active    bool   // tmux's current window of its session
+	attached  bool   // session attached by an outside client (session rows)
+	bell      bool   // ● window_bell_flag
+	done      bool   // ✓ @ghostmux_done (D5)
+	act       bool   // ~ window_activity_flag
+	inView    bool   // ▸ locked in the viewport
+	collapsed bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -62,6 +63,16 @@ func (r railRow) plain() string {
 		mark = "*"
 	}
 	return fmt.Sprintf("%s%s%-2s %s", strings.Repeat("  ", r.depth), mark, r.gutter(), r.label)
+}
+
+// plainFiltered is plain()'s counterpart for `rail once --filter q`: rows
+// that don't match the query get a leading "·" (dim marker); matching rows
+// get a leading space. Row order/positions are unchanged from plain().
+func (r railRow) plainFiltered(query string) string {
+	if matchesFilter(r, query) {
+		return " " + r.plain()
+	}
+	return "·" + r.plain()
 }
 
 // railRows is the live-tmux entry point: fetch the fleet and build the tree.
@@ -111,6 +122,53 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 		rows = append(rows, winRows...)
 	}
 	return rows
+}
+
+// visibleRows applies collapse state to a flat row tree: collapsed session
+// rows are stamped `collapsed: true` and their window rows are dropped
+// entirely. Pure function over rows + collapse state (Task 7).
+func visibleRows(rows []railRow, collapsed map[string]bool) []railRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]railRow, 0, len(rows))
+	hideSess := ""
+	for _, r := range rows {
+		if r.depth == 0 {
+			hideSess = ""
+			r.collapsed = collapsed[r.sess]
+			if r.collapsed {
+				hideSess = r.sess
+			}
+			out = append(out, r)
+			continue
+		}
+		if r.sess == hideSess {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// matchesFilter reports whether a row matches a filter query: case-
+// insensitive substring against the session name, or — for window rows —
+// against "index:name" too. A window row matches when its OWN label matches
+// or its SESSION matches (so every row of a matching session stays lit; only
+// non-matching sessions and their windows dim — DESIGN.md screen 5). An
+// empty query matches everything.
+func matchesFilter(r railRow, query string) bool {
+	if query == "" {
+		return true
+	}
+	q := strings.ToLower(query)
+	if strings.Contains(strings.ToLower(r.sess), q) {
+		return true
+	}
+	if r.depth == 1 && strings.Contains(strings.ToLower(r.label), q) {
+		return true
+	}
+	return false
 }
 
 // isViewed reports whether the viewport is showing this window: either it is

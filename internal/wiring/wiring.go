@@ -386,13 +386,21 @@ func gmSessions() (orphans []string, attached int) {
 }
 
 func freeGMName() string {
+	return FreeName(gmPrefix, "%d")
+}
+
+// FreeName returns the lowest-numbered "<prefix><numFmt(n)>" session name not
+// currently in use, e.g. FreeName("gm-", "%d") → "gm-0", "gm-1", ...;
+// FreeName("gm-agent-", "%02d") → "gm-agent-00", "gm-agent-01", ... Shared by
+// CmdShell's orphan-claiming and the rail's `a` (new agent session) key.
+func FreeName(prefix, numFmt string) string {
 	used := map[string]bool{}
 	out := tmux.Output("list-sessions", "-F", "#{session_name}")
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		used[line] = true
 	}
 	for n := 0; ; n++ {
-		if name := fmt.Sprintf("%s%d", gmPrefix, n); !used[name] {
+		if name := prefix + fmt.Sprintf(numFmt, n); !used[name] {
 			return name
 		}
 	}
