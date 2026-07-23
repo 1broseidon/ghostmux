@@ -11,7 +11,9 @@ var (
 	railSession = lipgloss.NewStyle().Bold(true)
 	railDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	railBell    = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	railDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	railAct     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	railView    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	railCursor  = lipgloss.NewStyle().Reverse(true)
 	railActive  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 )
@@ -33,12 +35,7 @@ func (m railModel) View() string {
 		default:
 			line += railDim.Render(r.label)
 		}
-		if strings.Contains(r.gutter, "●") {
-			line += " " + railBell.Render("●")
-		}
-		if strings.Contains(r.gutter, "~") {
-			line += " " + railAct.Render("~")
-		}
+		line += m.marks(r)
 		if i == m.cursor {
 			line = railCursor.Render(line)
 		}
@@ -50,4 +47,24 @@ func (m railModel) View() string {
 	}
 	b.WriteString("\n" + railDim.Render(hint))
 	return b.String()
+}
+
+// marks renders a row's attention glyphs. The bell blinks with the model phase
+// (hidden on phase 2); the rest render whenever set. Phase D restyles this in
+// truecolor and enforces the 2-glyph slot — here we keep it minimal.
+func (m railModel) marks(r railRow) string {
+	var out string
+	if r.bell && m.blinkPhase != 2 {
+		out += " " + railBell.Render("●")
+	}
+	if r.done {
+		out += " " + railDone.Render("✓")
+	}
+	if r.act {
+		out += " " + railAct.Render("~")
+	}
+	if r.inView {
+		out += " " + railView.Render("▸")
+	}
+	return out
 }

@@ -64,8 +64,15 @@ func Windows() []Window {
 	for _, line := range Lines("list-windows", "-a", "-F",
 		"#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}\t#{window_activity_flag}\t#{@ghostmux_done}") {
 		f := strings.Split(line, "\t")
-		if len(f) < 7 {
+		// @ghostmux_done is the last field and is empty when unset; Lines'
+		// whitespace-trim can drop that trailing empty field (and its tab) on
+		// the final row, so accept a 6-field row with done defaulting to false.
+		if len(f) < 6 {
 			continue
+		}
+		done := false
+		if len(f) >= 7 {
+			done = f[6] == "1"
 		}
 		windows = append(windows, Window{
 			Session:  f[0],
@@ -74,7 +81,7 @@ func Windows() []Window {
 			Active:   f[3] != "0",
 			Bell:     f[4] != "0",
 			Activity: f[5] != "0",
-			Done:     f[6] == "1",
+			Done:     done,
 			PaneCmds: panes[f[0]+":"+f[1]],
 		})
 	}

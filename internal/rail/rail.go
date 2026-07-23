@@ -8,6 +8,7 @@
 package rail
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,7 @@ func CmdRail(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "once":
-			for _, r := range railRows("") {
+			for _, r := range railRows("", viewState{}) {
 				fmt.Println(r.plain())
 			}
 			return nil
@@ -49,10 +50,26 @@ func CmdRail(args []string) error {
 	// Keep the pane alive between viewport respawns.
 	tmux.Run("set-option", "-p", "-t", vpPane, "remain-on-exit", "on")
 
+	// Event-driven refresh (D6): global hooks at [133] pulse a wait-for channel
+	// a listener goroutine blocks on. Hooks are torn down and the listener
+	// killed on every exit path.
+	installHooks()
+	defer removeHooks()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	vp := viewport{pane: vpPane, idleCmd: selfExe() + " rail idle"}
-	_, err := tea.NewProgram(
-		railModel{hub: sess, vp: vp, rows: railRows(sess)},
-		tea.WithAltScreen()).Run()
+	p := tea.NewProgram(
+		railModel{hub: sess, vp: vp, rows: railRows(sess, viewState{}), done: newDoneTracker()},
+		tea.WithAltScreen())
+	go waitLoop(ctx, p)
+	_, err := p.Run()
+	cancel() // stop the wait-for listener and kill its blocking child
+
+	// Tear the hooks down here, before the hub self-kill: kill-session '=hub'
+	// destroys the pane this process runs in, so a deferred cleanup would never
+	// execute on the hub path. (The defer still covers panic/early-error paths.)
+	removeHooks()
 
 	// In the dedicated hub session, quitting the rail tears the hub down; a
 	// manual `ghostmux rail` in another session just exits.
