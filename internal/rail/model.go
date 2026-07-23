@@ -96,6 +96,8 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tmux.Run("resize-pane", "-t", m.selfPane, "-x", fmt.Sprint(railWidth))
 		}
 		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -254,6 +256,65 @@ func (m railModel) updateKillConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.killTarget = ""
 	}
 	return m, nil
+}
+
+// updateMouse handles clicks and wheel scroll now that the rail owns mouse
+// reporting for its pane. Click selects a row; a click on the already-
+// selected row views it (same as ↵). Drags are consumed and ignored — that
+// is the point: they no longer fall through to tmux copy-mode.
+func (m railModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.helpView {
+		if msg.Action == tea.MouseActionPress {
+			m.helpView = false
+		}
+		return m, nil
+	}
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp:
+		m.moveCursor(-1)
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.moveCursor(1)
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		idx, ok := m.rowAt(msg.Y)
+		if !ok {
+			return m, nil
+		}
+		if idx == m.cursor {
+			if vis := m.visible(); idx < len(vis) {
+				r := vis[idx]
+				m.clearViewedDone(r)
+				m.vp.point(r.sess, r.window)
+				m.refresh()
+			}
+			return m, nil
+		}
+		m.cursor = idx
+	}
+	return m, nil
+}
+
+// rowAt maps a screen line to a visible-row index, mirroring the View's
+// layout math (title + blank above the tree, scroll indicators at the edges).
+func (m railModel) rowAt(y int) (int, bool) {
+	vis := m.visible()
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	treeHeight := height - 4
+	if treeHeight < 1 {
+		treeHeight = 1
+	}
+	start, end, moreUp, _ := scrollWindow(len(vis), treeHeight, m.cursor)
+	line := y - 2 // rows begin below the title and blank line
+	if moreUp > 0 {
+		line-- // first tree line is the ↑ indicator
+	}
+	idx := start + line
+	if line < 0 || idx < start || idx >= end {
+		return 0, false
+	}
+	return idx, true
 }
 
 // moveCursor steps the cursor by step (±1) over the visible rows, skipping

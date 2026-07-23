@@ -60,10 +60,13 @@ func CmdRail(args []string) error {
 	defer cancel()
 
 	vp := viewport{pane: vpPane, idleCmd: selfExe() + " rail idle"}
+	// WithMouseCellMotion: the rail claims mouse reporting for its pane —
+	// without it, a click-drag falls through to tmux and starts a copy-mode
+	// selection over the rail.
 	p := tea.NewProgram(
 		railModel{hub: sess, vp: vp, selfPane: os.Getenv("TMUX_PANE"),
 			rows: railRows(sess, viewState{}), done: newDoneTracker()},
-		tea.WithAltScreen())
+		tea.WithAltScreen(), tea.WithMouseCellMotion())
 	go waitLoop(ctx, p)
 	_, err := p.Run()
 	cancel() // stop the wait-for listener and kill its blocking child
