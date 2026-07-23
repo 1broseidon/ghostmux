@@ -471,11 +471,109 @@ func ambientOn() bool { return fileContains(ghosttySnippet(), "\ncommand = ") }
 
 // CmdHub is the single command that creates (or attaches to) the dedicated
 // `hub` session: the rail+viewport layout, built by ghostmux, never by
-// claiming an existing pane. See docs/SPEC.md §2 (Task 3).
+// claiming an existing pane. See docs/SPEC.md §2 (Task 3). Idempotent: a
+// healthy hub is only attached; a single-pane hub (rail pane died) is rebuilt.
 func CmdHub(args []string) error {
-	fmt.Fprintln(os.Stderr, "hub: not yet implemented")
-	os.Exit(1)
+	noAttach, newWindow := false, false
+	for _, a := range args {
+		switch a {
+		case "--no-attach":
+			noAttach = true
+		case "-w", "--window":
+			newWindow = true
+		default:
+			return fmt.Errorf("usage: ghostmux hub [-w] [--no-attach]")
+		}
+	}
+	exe := selfExe()
+	if tmux.Run("has-session", "-t", "=hub") != nil {
+		if err := buildHub(exe); err != nil {
+			return err
+		}
+	} else if hubPaneCount() < 2 {
+		// Rail pane died, leaving a single-pane window: the rail's in-memory
+		// state died with it, so a clean rebuild loses nothing recoverable.
+		tmux.Run("kill-session", "-t", "=hub")
+		if err := buildHub(exe); err != nil {
+			return err
+		}
+	}
+	if noAttach {
+		return nil
+	}
+	return attachHub(newWindow)
+}
+
+// buildHub creates the hub session and its rail+viewport layout.
+func buildHub(exe string) error {
+	if err := tmux.Run("new-session", "-d", "-s", "hub", "-n", "rail", exe+" rail"); err != nil {
+		return fmt.Errorf("tmux new-session: %w", err)
+	}
+	// Hub chrome needs no prefix: ctrl+b passes straight to the inner client
+	// (D1). Session-scoped so a manual `rail` elsewhere keeps its prefix.
+	// (set-option rejects the '=hub' exact-match form in tmux 3.4; plain
+	// 'hub' still resolves exactly since the session exists.)
+	tmux.Run("set-option", "-t", "hub", "prefix", "None")
+	tmux.Run("set-option", "-t", "hub", "prefix2", "None")
+
+	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}")
+	if len(panes) == 0 {
+		return fmt.Errorf("hub: rail pane not found")
+	}
+	railPane := panes[0]
+	vp := strings.TrimSpace(tmux.Output("split-window", "-h", "-d", "-l", "75%",
+		"-t", railPane, "-P", "-F", "#{pane_id}"))
+	if vp == "" {
+		return fmt.Errorf("hub: viewport split failed")
+	}
+	tmux.Run("resize-pane", "-t", railPane, "-x", "30")
+	tmux.Run("set-option", "-p", "-t", vp, "remain-on-exit", "on")
+	tmux.Run("respawn-pane", "-k", "-t", vp, exe+" rail idle")
 	return nil
+}
+
+// hubPaneCount reports how many panes the hub window has (0 if no server).
+func hubPaneCount() int {
+	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}")
+	if len(panes) == 1 && panes[0] == "" {
+		return 0
+	}
+	return len(panes)
+}
+
+// attachHub attaches to the hub per environment: switch inside tmux, exec
+// attach on a TTY, or open a ghostty window (-w, or no TTY to attach in).
+func attachHub(newWindow bool) error {
+	if os.Getenv("TMUX") != "" {
+		return tmux.Run("switch-client", "-t", "=hub")
+	}
+	if !newWindow && isTTY(os.Stdin) {
+		tmuxPath, err := exec.LookPath("tmux")
+		if err != nil {
+			return err
+		}
+		argv := append([]string{"tmux"}, tmux.Argv("attach", "-t", "=hub")...)
+		return syscall.Exec(tmuxPath, argv, os.Environ())
+	}
+	args := append([]string{"+new-window", "-e", "tmux"}, tmux.Argv("attach", "-t", "=hub")...)
+	cmd := exec.Command("ghostty", args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ghostty +new-window: %w", err)
+	}
+	return nil
+}
+
+// selfExe resolves this binary's path for spawning `ghostmux rail`/`rail idle`.
+func selfExe() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "ghostmux"
+	}
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	return exe
 }
 
 // ---- doctor ----

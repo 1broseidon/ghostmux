@@ -27,6 +27,24 @@ func tmuxArgs() []string {
 	return strings.Fields(v)
 }
 
+// Argv returns the full tmux argument vector including the GHOSTMUX_TMUX_ARGS
+// prefix, for callers that must exec tmux directly (attach replaces the
+// process, so it can't go through Runner).
+func Argv(args ...string) []string {
+	return append(tmuxArgs(), args...)
+}
+
+// ArgvString returns the GHOSTMUX_TMUX_ARGS prefix as a shell-ready string
+// with a leading space (or "" when unset), for embedding in a nested tmux
+// command run inside a pane (e.g. the viewport's `TMUX= tmux attach`).
+func ArgvString() string {
+	a := tmuxArgs()
+	if len(a) == 0 {
+		return ""
+	}
+	return " " + strings.Join(a, " ")
+}
+
 // Output runs args and returns stdout, or "" on error.
 func Output(args ...string) string {
 	out, err := Runner(args...)

@@ -44,6 +44,10 @@ func (m railModel) View() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString("\n" + railDim.Render("j/k move · enter view → · q quit"))
+	hint := "j/k move · enter view → · q quit"
+	if m.viewportDead {
+		hint = "↵ re-point viewport"
+	}
+	b.WriteString("\n" + railDim.Render(hint))
 	return b.String()
 }

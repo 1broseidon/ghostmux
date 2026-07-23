@@ -9,11 +9,12 @@ import (
 type railTick time.Time
 
 type railModel struct {
-	rows     []railRow
-	cursor   int
-	height   int
-	hub      string // session the rail lives in — excluded from the tree
-	viewport string // pane id where selections render as a nested client
+	rows         []railRow
+	cursor       int
+	height       int
+	hub          string   // session the rail lives in — excluded from the tree
+	vp           viewport // right-hand pane where selections render
+	viewportDead bool     // pane was dead this tick — swap the hint line
 }
 
 func railTicker() tea.Cmd {
@@ -26,6 +27,7 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case railTick:
 		m.rows = railRows(m.hub)
+		m.viewportDead = m.vp.heal()
 		m.clamp()
 		return m, railTicker()
 	case tea.WindowSizeMsg:
@@ -49,8 +51,14 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rows = railRows(m.hub)
 			m.clamp()
 		case "enter":
-			m.jump()
+			if m.cursor < len(m.rows) {
+				r := m.rows[m.cursor]
+				m.vp.point(r.sess, r.window)
+			}
 			m.rows = railRows(m.hub)
+		case "d":
+			m.vp.idle()
+			m.vp.detached = true
 		}
 	}
 	return m, nil
