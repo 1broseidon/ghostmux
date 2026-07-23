@@ -14,7 +14,7 @@ type railRow struct {
 	depth     int // 0 session, 1 window
 	label     string
 	sess      string
-	window    string // window index for depth-1
+	window    string // window index (depth-1 rows and flat session rows)
 	active    bool   // tmux's current window of its session
 	attached  bool   // session attached by an outside client (session rows)
 	bell      bool   // ● window_bell_flag
@@ -22,6 +22,8 @@ type railRow struct {
 	act       bool   // ~ window_activity_flag
 	inView    bool   // ▸ locked in the viewport
 	collapsed bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
+	flat      bool   // single-window session rendered as one row, no children
+	cmd       string // flat rows: the window's foreground command, shown dim
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -80,7 +82,7 @@ func (r railRow) plainFiltered(query string) string {
 // flags list only the marks that are set (empty string if none).
 func (r railRow) marks() string {
 	win := ""
-	if r.depth == 1 {
+	if r.depth == 1 || r.flat {
 		win = r.window
 	}
 	var flags []string
@@ -117,10 +119,30 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 		sessRow := railRow{depth: 0, label: s.Name, sess: s.Name, attached: s.Attached}
 		var winRows []railRow
 		var aggBell, aggDone, aggAct, aggView bool
+		var sessWins []tmux.Window
 		for _, w := range windows {
-			if w.Session != s.Name {
-				continue
+			if w.Session == s.Name {
+				sessWins = append(sessWins, w)
 			}
+		}
+		// A single-window session renders flat: one row, no children, the
+		// window's marks inherited directly and its foreground command shown
+		// dim — the rail reads as a fleet dashboard, not a file tree.
+		if len(sessWins) == 1 {
+			w := sessWins[0]
+			cmd := ""
+			if len(w.PaneCmds) > 0 {
+				cmd = w.PaneCmds[0]
+			}
+			rows = append(rows, railRow{
+				depth: 0, flat: true, label: s.Name, sess: s.Name,
+				window: w.Index, attached: s.Attached, active: w.Active,
+				bell: w.Bell, done: w.Done, act: w.Activity,
+				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
+			})
+			continue
+		}
+		for _, w := range sessWins {
 			inView := isViewed(v, w.Session, w.Index, w.Active)
 			winRows = append(winRows, railRow{
 				depth: 1, label: w.Index + ":" + w.Name,
@@ -160,9 +182,11 @@ func visibleRows(rows []railRow, collapsed map[string]bool) []railRow {
 	for _, r := range rows {
 		if r.depth == 0 {
 			hideSess = ""
-			r.collapsed = collapsed[r.sess]
-			if r.collapsed {
-				hideSess = r.sess
+			if !r.flat { // flat rows have no children and no disclosure state
+				r.collapsed = collapsed[r.sess]
+				if r.collapsed {
+					hideSess = r.sess
+				}
 			}
 			out = append(out, r)
 			continue

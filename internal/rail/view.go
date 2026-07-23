@@ -56,8 +56,8 @@ func (m railModel) View() string {
 		treeHeight = 1
 	}
 
-	if m.helpFallback {
-		return helpFallbackPage(height)
+	if m.helpView {
+		return helpPage(height)
 	}
 
 	var b strings.Builder
@@ -193,7 +193,11 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 
 	indent := "     " // window rows: 5-col indent
 	arrow := ""
-	if r.depth == 0 {
+	switch {
+	case r.flat:
+		arrow = "  " // no disclosure; keep names column-aligned with ▾ rows
+		indent = " "
+	case r.depth == 0:
 		arrow = "▾ "
 		if r.collapsed {
 			arrow = "▸ "
@@ -215,32 +219,47 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		nameWidth = 1
 	}
 	name := truncateLabel(r.label, nameWidth)
-	label := name + suffix
-	label = label + strings.Repeat(" ", max0(labelWidth-len([]rune(label))))
 
-	var arrowStyled string
-	if arrow != "" {
-		arrowStyled = rowStyle(hexTitleTail, false, cursor).Render(arrow)
-		if dim {
-			arrowStyled = rowStyle(hexCursorBg, false, cursor).Render(arrow)
+	// Flat rows show the window's foreground command dim after the name,
+	// truncated into whatever space the name and suffix leave over.
+	cmdStr := ""
+	if r.flat && r.cmd != "" {
+		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
+		if rest >= 5 { // " · " + at least 2 chars of command
+			cmdStr = " · " + truncateLabel(r.cmd, rest-3)
 		}
 	}
 
+	// Everything left of the marks pads to labelWidth so the marks land
+	// flush right at the rail edge, every row, every time. Widths are
+	// measured on the RAW strings — styling happens after.
+	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdStr))
+	pad := strings.Repeat(" ", max0(labelWidth-used))
+
+	dimFg := func(fg string) string {
+		if dim {
+			return hexCursorBg
+		}
+		return fg
+	}
+
+	var arrowStyled string
+	if arrow != "" {
+		arrowStyled = rowStyle(dimFg(hexTitleTail), false, cursor).Render(arrow)
+	}
 	nameFg, nameBold := nameStyle(r)
 	if dim {
 		nameFg, nameBold = hexCursorBg, false
 	}
 	nameStyled := rowStyle(nameFg, nameBold, cursor).Render(name)
-
 	suffixStyled := ""
 	if suffix != "" {
-		suffixFg := hexAttached
-		if dim {
-			suffixFg = hexCursorBg
-		}
-		suffixStyled = rowStyle(suffixFg, false, cursor).Render(suffix)
+		suffixStyled = rowStyle(dimFg(hexAttached), false, cursor).Render(suffix)
 	}
-	pad := strings.Repeat(" ", max0(labelWidth-len([]rune(label))))
+	cmdStyled := ""
+	if cmdStr != "" {
+		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(cmdStr)
+	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
 
 	marks := padMarksLeft(r.gutter(), railMarksWidth)
@@ -248,7 +267,7 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 
 	indentStyled := rowStyle(hexTitleTail, false, cursor).Render(indent)
 
-	return indentStyled + arrowStyled + nameStyled + suffixStyled + padStyled + marksStyled
+	return indentStyled + arrowStyled + nameStyled + suffixStyled + cmdStyled + padStyled + marksStyled
 }
 
 func max0(n int) int {

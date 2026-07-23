@@ -61,7 +61,8 @@ func CmdRail(args []string) error {
 
 	vp := viewport{pane: vpPane, idleCmd: selfExe() + " rail idle"}
 	p := tea.NewProgram(
-		railModel{hub: sess, vp: vp, rows: railRows(sess, viewState{}), done: newDoneTracker()},
+		railModel{hub: sess, vp: vp, selfPane: os.Getenv("TMUX_PANE"),
+			rows: railRows(sess, viewState{}), done: newDoneTracker()},
 		tea.WithAltScreen())
 	go waitLoop(ctx, p)
 	_, err := p.Run()

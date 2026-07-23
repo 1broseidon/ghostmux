@@ -55,8 +55,8 @@ func TestRailRows(t *testing.T) {
 				{depth: 0, label: "alpha", sess: "alpha", attached: false},
 				{depth: 1, label: "1:vim", sess: "alpha", window: "1", active: true},
 				{depth: 1, label: "2:shell", sess: "alpha", window: "2", active: false},
-				{depth: 0, label: "beta", sess: "beta", attached: true},
-				{depth: 1, label: "1:zsh", sess: "beta", window: "1", active: true},
+				// single-window session: one flat row, window marks inherited
+				{depth: 0, flat: true, label: "beta", sess: "beta", window: "1", attached: true, active: true},
 			},
 		},
 		{
@@ -68,8 +68,7 @@ func TestRailRows(t *testing.T) {
 					"work\t1\tzsh\t1\t0\t0\t0\n",
 			},
 			want: []railRow{
-				{depth: 0, label: "work", sess: "work", attached: false},
-				{depth: 1, label: "1:zsh", sess: "work", window: "1", active: true},
+				{depth: 0, flat: true, label: "work", sess: "work", window: "1", active: true},
 			},
 		},
 		{
@@ -79,8 +78,7 @@ func TestRailRows(t *testing.T) {
 				"list-windows":  "solo\t1\tzsh\t1\t0\t0\t0\n",
 			},
 			want: []railRow{
-				{depth: 0, label: "solo", sess: "solo", attached: true},
-				{depth: 1, label: "1:zsh", sess: "solo", window: "1", active: true},
+				{depth: 0, flat: true, label: "solo", sess: "solo", window: "1", attached: true, active: true},
 			},
 		},
 		{

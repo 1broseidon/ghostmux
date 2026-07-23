@@ -58,18 +58,26 @@ func cmdHelp() error {
 	return nil
 }
 
-// helpFallbackPage renders a full-rail help page when `tmux display-popup`
-// fails (no tmux, old tmux, popup denied) — Update() swaps View()'s body to
-// this instead of quitting or leaving the user stranded (Task 10).
-func helpFallbackPage(height int) string {
+// helpPage renders the in-pane help view that `?` toggles — sized for the
+// 30-col rail, keys from keyHelpTable (the single source of truth),
+// descriptions truncated to fit rather than wrap.
+func helpPage(_ int) string {
+	const keyCol = 9
+	descWidth := railWidth - keyCol - 4
 	var b strings.Builder
 	b.WriteString(titleLine() + "\n\n")
 	b.WriteString("  " + styTitleName.Render("keys") + "\n\n")
 	for _, k := range keyHelpTable {
-		b.WriteString(fmt.Sprintf("  %9s  %s\n", styActivity.Render(k.key), styHint.Render(k.desc)))
+		key := truncateLabel(k.key, keyCol)
+		b.WriteString(" " + styActivity.Render(fmt.Sprintf("%*s", keyCol, key)) +
+			"  " + styHint.Render(truncateLabel(k.desc, descWidth)) + "\n")
 	}
-	b.WriteString("\n  " + styHint.Render("gutter: ● bell  ✓ done  ~ activity  ▸ viewing") + "\n")
-	b.WriteString("  " + styHint.Render("inner tmux prefix: ctrl+b ctrl+b") + "\n")
-	b.WriteString("\n" + styHint.Render("  press ? to close"))
+	b.WriteString("\n " + styHint.Render("gutter:") + " " +
+		styBell.Render("●") + styHint.Render("bell ") +
+		rowStyle(hexAttached, false, false).Render("✓") + styHint.Render("done") + "\n")
+	b.WriteString("         " + styActivity.Render("~") + styHint.Render("act  ") +
+		styTitleAccent.Render("▸") + styHint.Render("viewing") + "\n")
+	b.WriteString(" " + styHint.Render("hub: ctrl+b → inner tmux") + "\n")
+	b.WriteString("\n " + styHint.Render("? / esc close"))
 	return b.String()
 }

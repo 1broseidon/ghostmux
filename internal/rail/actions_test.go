@@ -97,8 +97,8 @@ func TestCmdOnceFilterMatchesSpecExample(t *testing.T) {
 			t.Errorf("unexpected dimmed session %q", sess)
 		}
 	}
-	if len(dimmed) != 2 { // alpha's session row + its one window row
-		t.Errorf("expected exactly alpha's 2 rows dimmed, got %v", dimmed)
+	if len(dimmed) != 1 { // alpha is single-window → one flat row
+		t.Errorf("expected exactly alpha's flat row dimmed, got %v", dimmed)
 	}
 }
 

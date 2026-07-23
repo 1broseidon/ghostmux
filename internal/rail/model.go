@@ -3,7 +3,6 @@ package rail
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -15,11 +14,6 @@ import (
 
 type railTick time.Time
 type blinkMsg time.Time
-
-// helpDoneMsg reports the outcome of the `?` help popup (Task 10): a non-zero
-// exit from `tmux display-popup` (e.g. run outside tmux, or the tmux version
-// lacks it) falls back to a full-rail help page.
-type helpDoneMsg struct{ err error }
 
 // mode selects which keymap Update() dispatches to and what the hint line
 // shows (Tasks 8-9).
@@ -54,7 +48,8 @@ type railModel struct {
 	errMsg   string    // last action error, shown on the hint line
 	errUntil time.Time // errMsg clears once time.Now() passes this
 
-	helpFallback bool // display-popup failed: render the full-rail help page (Task 10)
+	helpView bool   // `?` toggles the in-pane help page
+	selfPane string // the rail's own pane id, for width self-enforcement
 }
 
 func railTicker() tea.Cmd {
@@ -92,17 +87,25 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.blinkPhase = (m.blinkPhase + 1) % 3
 		return m, blinkTicker()
-	case helpDoneMsg:
-		if msg.err != nil {
-			m.helpFallback = true
-		}
-		return m, nil
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
+		// Self-enforce the rail width: hub creation resizes while detached,
+		// and tmux rescales panes proportionally when a client attaches — so
+		// the rail owns its own width, on start and on every resize.
+		if m.selfPane != "" && m.vp.pane != "" && msg.Width != railWidth {
+			tmux.Run("resize-pane", "-t", m.selfPane, "-x", fmt.Sprint(railWidth))
+		}
 		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.helpView {
+			switch msg.String() {
+			case "?", "esc", "q", "enter":
+				m.helpView = false
+			}
+			return m, nil
 		}
 		switch m.mode {
 		case modeFilter:
@@ -182,11 +185,7 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clamp()
 		}
 	case "?":
-		if m.helpFallback {
-			m.helpFallback = false
-			return m, nil
-		}
-		return m, showHelp()
+		m.helpView = true
 	}
 	return m, nil
 }
@@ -336,17 +335,6 @@ func (m *railModel) killSession(name string) error {
 	}
 	m.refresh()
 	return nil
-}
-
-// showHelp runs the `?` popup out-of-band: `tmux display-popup` running
-// `rail help`. A non-zero exit (no tmux, old tmux, popup denied) reports
-// helpDoneMsg{err!=nil} so Update() falls back to the in-rail help page.
-func showHelp() tea.Cmd {
-	return func() tea.Msg {
-		exe := selfExe()
-		err := exec.Command("tmux", tmux.Argv("display-popup", "-E", "-w", "58", "-h", "24", exe+" rail help")...).Run()
-		return helpDoneMsg{err: err}
-	}
 }
 
 // refresh reloads the fleet, runs done-tracking, and rebuilds the rows. It is
