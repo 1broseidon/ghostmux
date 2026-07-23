@@ -527,6 +527,7 @@ func buildHub(exe string) error {
 	// focuses them without needing prefix navigation, regardless of the
 	// user's own tmux mouse setting (which stays untouched everywhere else).
 	tmux.Run("set-option", "-t", "hub", "mouse", "on")
+	hubChrome()
 
 	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}")
 	if len(panes) == 0 {
@@ -542,6 +543,44 @@ func buildHub(exe string) error {
 	tmux.Run("set-option", "-p", "-t", vp, "remain-on-exit", "on")
 	tmux.Run("respawn-pane", "-k", "-t", vp, exe+" rail idle")
 	return nil
+}
+
+// hubChrome themes the hub session per docs/DESIGN.md §1/§4 — thin muted pane
+// divider and the hand-rolled Gruvbox status bar. Everything session- or
+// hub-window-scoped: the user's own tmux theme is untouched everywhere else
+// (the "no status theming" cut in SPEC §7 is about user sessions; the hub is
+// ghostmux chrome).
+func hubChrome() {
+	// Divider: quiet single line, muted green when the rail side is active
+	// (chrome, not signal — DESIGN.md §1 col-31 divider).
+	tmux.Run("set-option", "-t", "hub", "pane-border-style", "fg=#504945,bg=default")
+	tmux.Run("set-option", "-t", "hub", "pane-active-border-style", "fg=#98971a,bg=default")
+
+	// Status bar (DESIGN.md §4): bg1 row, gold `hub` block left, current
+	// window in bg2 with a gold star, right side ghostty version · date ·
+	// time · green `gm` block at the extreme right.
+	tmux.Run("set-option", "-t", "hub", "status-style", "bg=#3c3836,fg=#a89984")
+	tmux.Run("set-option", "-t", "hub", "status-left",
+		"#[bg=#d79921,fg=#1d2021,bold] hub #[bg=#3c3836] ")
+	tmux.Run("set-option", "-t", "hub", "status-left-length", "12")
+	tmux.Run("set-option", "-t", "hub", "status-right",
+		ghosttyVersionLabel()+" #[fg=#665c54]│#[fg=#a89984] %d-%b #[fg=#665c54]│#[fg=#a89984] %H:%M #[bg=#689d6a,fg=#1d2021,bold] gm ")
+	tmux.Run("set-option", "-t", "hub", "status-right-length", "48")
+	tmux.Run("set-option", "-w", "-t", "hub:0", "window-status-format", " #I:#W ")
+	tmux.Run("set-option", "-w", "-t", "hub:0", "window-status-current-format",
+		"#[bg=#504945,fg=#fbf1c7] #I:#W#[fg=#fabd2f]*#[bg=#504945] ")
+	tmux.Run("set-option", "-w", "-t", "hub:0", "window-status-separator", "")
+}
+
+// ghosttyVersionLabel returns e.g. "ghostty 1.3.1" for the hub status bar,
+// or plain "ghostty" when the version can't be read.
+func ghosttyVersionLabel() string {
+	out, err := exec.Command("ghostty", "+version").Output()
+	if err != nil {
+		return "ghostty"
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	return strings.ToLower(strings.TrimSpace(line))
 }
 
 // hubPaneCount reports how many panes the hub window has (0 if no server).
