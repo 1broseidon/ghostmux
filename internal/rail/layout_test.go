@@ -1,6 +1,9 @@
 package rail
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTruncateLabel(t *testing.T) {
 	cases := []struct {
@@ -76,10 +79,10 @@ func TestScrollWindowEmpty(t *testing.T) {
 func TestVisibleRowsCollapse(t *testing.T) {
 	rows := []railRow{
 		{depth: 0, sess: "a", label: "a"},
-		{depth: 1, sess: "a", label: "1:x"},
-		{depth: 1, sess: "a", label: "2:y"},
+		{depth: 1, isWin: true, sess: "a", label: "1:x"},
+		{depth: 1, isWin: true, sess: "a", label: "2:y"},
 		{depth: 0, sess: "b", label: "b"},
-		{depth: 1, sess: "b", label: "1:z"},
+		{depth: 1, isWin: true, sess: "b", label: "1:z"},
 	}
 	got := visibleRows(rows, map[string]bool{"a": true})
 	if len(got) != 3 {
@@ -95,7 +98,7 @@ func TestVisibleRowsCollapse(t *testing.T) {
 
 func TestMatchesFilter(t *testing.T) {
 	sessRow := railRow{depth: 0, sess: "gm-agent-01", label: "gm-agent-01"}
-	winRow := railRow{depth: 1, sess: "gm-agent-01", label: "1:claude"}
+	winRow := railRow{depth: 1, isWin: true, sess: "gm-agent-01", label: "1:claude"}
 	other := railRow{depth: 0, sess: "dotfiles", label: "dotfiles"}
 
 	if !matchesFilter(sessRow, "agent") {
@@ -112,5 +115,69 @@ func TestMatchesFilter(t *testing.T) {
 	}
 	if !matchesFilter(other, "") {
 		t.Errorf("empty query should match everything")
+	}
+}
+
+// TestRowAtIsTheInverseOfWhatViewDraws is the regression for the off-by-two
+// click: View() and rowAt() are the same layout expressed twice — once to
+// draw, once to hit-test. When the title row was deleted from View but rowAt
+// still skipped two lines for it, every click selected the row two above the
+// one under the pointer. Rather than assert a magic offset, this walks the
+// rendered frame and demands that the row rowAt() reports for a line is the
+// row actually printed on that line.
+func TestRowAtIsTheInverseOfWhatViewDraws(t *testing.T) {
+	var rows []railRow
+	for _, name := range []string{"alpha", "beta", "gamma", "delta"} {
+		rows = append(rows,
+			railRow{depth: 0, label: name, sess: name},
+			railRow{depth: 1, isWin: true, label: "1:zsh", sess: name, window: "1"})
+	}
+	m := railModel{rows: rows, height: 24, collapsed: map[string]bool{}, vp: &fakeViewport{}}
+
+	frame := strings.Split(m.View(), "\n")
+	vis := m.visible()
+	if len(vis) == 0 {
+		t.Fatal("no visible rows to test")
+	}
+	checked := 0
+	for y, line := range frame {
+		idx, ok := m.rowAt(y)
+		if !ok {
+			continue
+		}
+		if idx < 0 || idx >= len(vis) {
+			t.Fatalf("rowAt(%d) = %d, out of range for %d rows", y, idx, len(vis))
+		}
+		// The label of the row rowAt claims must appear on that very line.
+		if want := vis[idx].label; !strings.Contains(line, want) {
+			t.Errorf("rowAt(%d) = %d (%q), but line %d reads %q",
+				y, idx, want, y, strings.TrimRight(line, " "))
+		}
+		checked++
+	}
+	if checked < len(vis) {
+		t.Errorf("only %d of %d visible rows were hit-testable", checked, len(vis))
+	}
+}
+
+// TestRowAtRejectsChromeLines: clicks on the blank separator and the hint line
+// must select nothing rather than the nearest row.
+func TestRowAtRejectsChromeLines(t *testing.T) {
+	m := railModel{
+		rows:      []railRow{{depth: 0, label: "solo", sess: "solo"}},
+		height:    10,
+		collapsed: map[string]bool{},
+		vp:        &fakeViewport{},
+	}
+	if _, ok := m.rowAt(0); !ok {
+		t.Errorf("first tree line should hit the first row")
+	}
+	for _, y := range []int{m.treeHeight(), m.treeHeight() + 1} {
+		if idx, ok := m.rowAt(y); ok {
+			t.Errorf("chrome line %d hit row %d, want no hit", y, idx)
+		}
+	}
+	if _, ok := m.rowAt(-1); ok {
+		t.Errorf("negative line reported a hit")
 	}
 }

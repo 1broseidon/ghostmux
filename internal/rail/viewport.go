@@ -1,16 +1,8 @@
 package rail
 
 import (
-	"fmt"
-	"strings"
-	"time"
-
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
-
-// hubSession is the reserved name of the dedicated session `ghostmux hub`
-// builds; the rail excludes it from the tree and tears it down on quit.
-const hubSession = "hub"
 
 // gmViewPrefix names the transient grouped sessions the viewport attaches
 // through when the target is attached elsewhere (e.g. over ssh): same
@@ -18,129 +10,84 @@ const hubSession = "hub"
 // fights the viewport. destroy-unattached makes them self-cleaning.
 const gmViewPrefix = "gm-view-"
 
-// viewport is the right-hand pane of the hub: a live nested tmux client the
-// rail re-points without ever moving itself.
-type viewport struct {
-	pane        string // %id of the pane
-	idleCmd     string // command that renders the idle placeholder
-	lockSess    string // session currently rendered, "" = idle
-	lockWin     string // window index within lockSess
-	lockBackend string // "" = tmux; e.g. "zellij"
-	detached    bool   // user pressed d — heal re-idles instead of re-pointing
-	grouped     bool   // attached via a gm-view-* grouped session (tmux only)
+// ViewState is the viewport's current lock: what it is showing, used to
+// compute inView marks and to suppress the done mark on a session the user
+// is watching.
+type ViewState struct {
+	Sess    string
+	Win     string // "" = whole session (its active window)
+	Backend string // "" = tmux; e.g. "zellij"
 }
 
-// attachTarget is the session name the viewport's client is actually attached
-// to: the grouped shadow when grouped, otherwise the session itself.
-func (v viewport) attachTarget() string {
-	if v.grouped {
-		return gmViewPrefix + v.lockSess
-	}
-	return v.lockSess
+// Viewport is the seam between the rail's brain and whatever renders its
+// selections. The panel drives an embedded terminal on a pty; the interface
+// exists so the rail never learns how its selections are displayed.
+type Viewport interface {
+	// Point renders a tmux session (and window, if given); grouped attaches
+	// through a transient gm-view-* session group.
+	Point(sess, win string, grouped bool)
+	// PointAux renders a non-tmux backend's session (e.g. zellij).
+	PointAux(backend, sess string)
+	// Idle renders the idle placeholder and drops the lock.
+	Idle()
+	// Detach is the `d` key: idle, and stay idle across heals.
+	Detach()
+	// Heal runs per data tick; it re-points a dead viewport onto its lock
+	// (or idle) and reports whether it was dead — the transient hint line.
+	Heal() bool
+	// Lock is the current view lock, driving inView marks + done suppression.
+	Lock() ViewState
+	// AttachTarget is the session the viewport's client is actually attached
+	// to: the gm-view-* shadow when grouped, else the session itself.
+	AttachTarget() string
+	// FocusViewport moves input focus to the viewport (the `l`/`→` key).
+	FocusViewport()
+	// SyncActiveWindow follows the viewport client's own window focus: ctrl+b
+	// navigation inside the inner session changes its active window — the lock
+	// tracks it so ▸, heal, and the cursor all point at what the viewport
+	// actually shows. Aux backends have no observable focus; no-op for them.
+	SyncActiveWindow(windows []tmux.Window)
+	// OnKill reacts to a session kill: cleans up the gm-view-* shadow (which
+	// would otherwise keep the killed session's windows alive in its group)
+	// and idles if the kill took the lock.
+	OnKill(sess, backend string)
 }
 
-// point respawns the viewport as a nested tmux client rendering sess (and a
-// window, if given). grouped attaches through a transient session group so an
-// ssh (or any outside) client on the same session keeps its own size and
-// focus. It updates the lock and clears the viewed window's marks.
-func (v *viewport) point(sess, window string, grouped bool) {
-	if v.pane == "" || sess == "" {
-		return
-	}
-	// TMUX= lets a client attach from inside tmux; the socket args keep the
-	// nested client on the server the rail is driving; \; chains commands
-	// onto the attach.
+// AttachArgv is the argument vector of the tmux client command that renders
+// sess (and win, if given); the panel execs it on a pty. grouped attaches
+// through a transient gm-view-* session group, so a client already attached
+// elsewhere keeps its own size and current window. destroy-unattached makes
+// the group self-cleaning: it dies with the pty child.
+func AttachArgv(sess, win string, grouped bool) []string {
 	target := sess
-	var attach string
+	var argv []string
 	if grouped {
 		target = gmViewPrefix + sess
-		attach = fmt.Sprintf(
-			"TMUX= tmux%s new-session -A -s '%s' -t '=%s' \\; set-option destroy-unattached on \\; set-option status-left '[%s] '",
-			tmux.ArgvString(), target, sess, sess)
+		argv = append([]string{"tmux"}, tmux.Argv(
+			"new-session", "-A", "-s", target, "-t", "="+sess,
+			";", "set-option", "destroy-unattached", "on",
+			";", "set-option", "status-left", "["+sess+"] ")...)
 	} else {
-		attach = fmt.Sprintf("TMUX= tmux%s attach-session -t '=%s'", tmux.ArgvString(), sess)
+		argv = append([]string{"tmux"}, tmux.Argv("attach-session", "-t", "="+sess)...)
 	}
-	if window != "" {
-		attach += fmt.Sprintf(" \\; select-window -t '=%s:%s'", target, window)
+	if win != "" {
+		argv = append(argv, ";", "select-window", "-t", "="+target+":"+win)
 	}
-	tmux.Run("respawn-pane", "-k", "-t", v.pane, attach)
-	v.lockSess, v.lockWin, v.detached, v.grouped = sess, window, false, grouped
-	v.lockBackend = ""
-	if window != "" {
-		tmux.SetDone(sess, window, false)
-	}
+	return argv
 }
 
-// pointAux respawns the viewport onto a non-tmux backend's session. The
-// attach command is per-backend; no grouped machinery — backends without
+// GroupedName is the transient session AttachArgv creates when grouped — the
+// name the frame must use as the attach target (and tear down on kill).
+func GroupedName(sess string) string { return gmViewPrefix + sess }
+
+// AuxAttachArgv is the attach command for a non-tmux backend's session, or
+// nil for an unknown backend. No grouped machinery — backends without
 // session groups simply attach directly.
-func (v *viewport) pointAux(backend, sess string) {
-	if v.pane == "" || sess == "" {
-		return
-	}
-	var attach string
+func AuxAttachArgv(backend, sess string) []string {
 	switch backend {
 	case "zellij":
-		attach = fmt.Sprintf("zellij attach '%s'", sess)
+		return []string{"zellij", "attach", sess}
 	default:
-		return
+		return nil
 	}
-	tmux.Run("respawn-pane", "-k", "-t", v.pane, attach)
-	v.lockSess, v.lockWin, v.lockBackend = sess, "", backend
-	v.detached, v.grouped = false, false
-}
-
-// idle respawns the viewport onto the ghostmux idle placeholder and drops any
-// session lock.
-func (v *viewport) idle() {
-	if v.pane == "" {
-		return
-	}
-	tmux.Run("respawn-pane", "-k", "-t", v.pane, v.idleCmd)
-	v.lockSess, v.lockWin, v.lockBackend = "", "", ""
-}
-
-// heal runs on every data tick: if the pane died, re-point it onto its lock,
-// or onto idle when the user detached or nothing is locked. It reports whether
-// the pane was dead, which drives the transient "↵ re-point viewport" hint.
-func (v *viewport) heal() bool {
-	if v.pane == "" || !tmux.PaneDead(v.pane) {
-		return false
-	}
-	if v.detached || v.lockSess == "" {
-		v.idle()
-	} else if v.lockBackend != "" {
-		v.pointAux(v.lockBackend, v.lockSess)
-	} else {
-		v.point(v.lockSess, v.lockWin, v.grouped)
-	}
-	return true
-}
-
-// discoverViewport returns the pane the viewport lives in. In the hub session
-// the pane is built by `ghostmux hub`, so we wait briefly for it to appear
-// (construction race); elsewhere a bare `ghostmux rail` splits its own.
-func discoverViewport(sess, mine string) string {
-	if v := siblingPane(mine); v != "" {
-		return v
-	}
-	if sess == hubSession {
-		for range 40 {
-			time.Sleep(50 * time.Millisecond)
-			if v := siblingPane(mine); v != "" {
-				return v
-			}
-		}
-	}
-	return strings.TrimSpace(tmux.Output("split-window", "-h", "-d", "-P", "-F", "#{pane_id}"))
-}
-
-// siblingPane returns the first pane in the current window that isn't mine.
-func siblingPane(mine string) string {
-	for _, id := range tmux.Lines("list-panes", "-F", "#{pane_id}") {
-		if id != mine && id != "" {
-			return id
-		}
-	}
-	return ""
 }

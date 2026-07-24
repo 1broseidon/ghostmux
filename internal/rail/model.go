@@ -25,14 +25,24 @@ const (
 	modeFilter
 	modeCreate
 	modeKillConfirm
+	modeGroup
 )
+
+// foldKey is the collapse-map key for a row: groups are namespaced so a group
+// and a session sharing a name never share disclosure state.
+func foldKey(r railRow) string {
+	if r.isGroup {
+		return groupKey(r.label)
+	}
+	return r.sess
+}
 
 type railModel struct {
 	rows         []railRow
 	cursor       int // index into visible() rows, not raw rows
 	height       int
 	hub          string          // session the rail lives in — excluded from the tree
-	vp           viewport        // right-hand pane where selections render
+	vp           Viewport        // where selections render (pane / embedded pty)
 	viewportDead bool            // pane was dead this tick — swap the hint line
 	done         *doneTracker    // per-pane command-transition tracking (D5)
 	attached     map[string]bool // session name → attached elsewhere
@@ -43,17 +53,76 @@ type railModel struct {
 
 	mode        mode
 	filterQuery string          // active filter substring (Task 8)
-	killTarget  string          // session pending `x` confirmation (Task 9)
+	killTarget  string          // session or group pending `x` confirmation
 	killBackend string          // backend of killTarget ("" = tmux)
+	killGroup   bool            // the kill target is a group, not a session
 	input       textinput.Model // shared prompt editor for `/` and `n` modes
 
 	errMsg   string    // last action error, shown on the hint line
 	errUntil time.Time // errMsg clears once time.Now() passes this
 
-	helpView bool   // `?` toggles the in-pane help page
-	selfPane string // the rail's own pane id, for width self-enforcement
+	helpView bool // `?` toggles the in-pane help page
+
+	// selfAux is the rail's own host session on a non-tmux backend (the tmux
+	// equivalent is `hub`). A frame running inside a multiplexer must not list
+	// its own host: selecting it would render the frame inside itself.
+	selfAux, selfAuxBackend string
+
+	createBackend string // backend the `n` prompt will create on ("" = tmux)
+
+	// groups is the only rail state not rediscovered from the multiplexers:
+	// user intent, loaded once and written back on every change.
+	groups []Group
 
 	lastViewed string // "sess:win" the cursor last auto-followed the viewport to
+}
+
+// Model is the rail's public face for composition: the solo frame embeds it
+// as a child bubbletea model, sharing the exact keymap/modes/refresh brain
+// classic runs.
+type Model = railModel
+
+// New builds a rail model over a Viewport. The frame owns layout and chrome;
+// the rail owns rows, marks, modes and keys. Use InHost to exclude the session
+// the frame itself is running inside, if any.
+func New(vp Viewport) Model {
+	groups, collapsed := loadState()
+	m := Model{vp: vp, groups: groups, collapsed: collapsed, done: newDoneTracker()}
+	m.rows = applyGroups(railRows("", ViewState{}), m.groups)
+	return m
+}
+
+// InHost tells the rail which multiplexer session it is itself running inside
+// (backend "" = tmux), so it never lists — or nests into — its own host. A
+// standalone frame is stateless: everything it shows is rediscovered from the
+// muxes each tick, so it can simply be relaunched anywhere. Running it inside
+// a session is how it gets resume for free, and this is what makes that safe.
+func (m Model) InHost(backend, sess string) Model {
+	if sess == "" {
+		return m
+	}
+	if backend == "" {
+		m.hub = sess
+	} else {
+		m.selfAux, m.selfAuxBackend = sess, backend
+	}
+	m.rows = applyGroups(railRows(m.hub, ViewState{}), m.groups)
+	return m
+}
+
+// visibleAux drops the rail's own host from the aux session list.
+func (m railModel) visibleAux(aux []auxSession) []auxSession {
+	if m.selfAux == "" {
+		return aux
+	}
+	out := aux[:0:0]
+	for _, a := range aux {
+		if a.backend == m.selfAuxBackend && a.name == m.selfAux {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func railTicker() tea.Cmd {
@@ -74,13 +143,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case railTick:
 		m.refresh()
-		m.viewportDead = m.vp.heal()
+		m.viewportDead = m.vp.Heal()
 		m.clamp()
 		debugRefresh("tick")
 		return m, tea.Batch(railTicker(), m.maybeBlink())
 	case refreshMsg:
 		m.refresh()
-		m.viewportDead = m.vp.heal()
+		m.viewportDead = m.vp.Heal()
 		m.clamp()
 		debugRefresh("event")
 		return m, m.maybeBlink()
@@ -93,12 +162,6 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, blinkTicker()
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
-		// Self-enforce the rail width: hub creation resizes while detached,
-		// and tmux rescales panes proportionally when a client attaches — so
-		// the rail owns its own width, on start and on every resize.
-		if m.selfPane != "" && m.vp.pane != "" && msg.Width != railWidth {
-			tmux.Run("resize-pane", "-t", m.selfPane, "-x", fmt.Sprint(railWidth))
-		}
 		return m, nil
 	case tea.MouseMsg:
 		return m.updateMouse(msg)
@@ -120,6 +183,8 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCreateKey(msg)
 		case modeKillConfirm:
 			return m.updateKillConfirmKey(msg)
+		case modeGroup:
+			return m.updateGroupKey(msg)
 		default:
 			return m.updateNormalKey(msg)
 		}
@@ -153,35 +218,48 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.maybeBlink()
 	case "enter":
 		if vis := m.visible(); m.cursor < len(vis) {
-			m.pointRow(vis[m.cursor])
+			m.activateRow(vis[m.cursor])
 		}
-		m.refresh()
 	case "tab":
 		if vis := m.visible(); m.cursor < len(vis) {
-			sess := vis[m.cursor].sess
-			m.collapsed[sess] = !m.collapsed[sess]
-			m.clamp()
+			m.toggleFold(vis[m.cursor])
 		}
-	case "l", "right":
-		// Focus the viewport — the rail's own affordance, independent of
-		// any root-table ctrl+h/l nav bindings.
-		if m.vp.pane != "" {
-			tmux.Run("select-pane", "-t", m.vp.pane)
-		}
-	case "d":
-		m.vp.idle()
-		m.vp.detached = true
-		m.refresh()
-	case "n":
-		m.mode = modeCreate
+	case "a":
+		// Name the shelf before you fill it: empty groups are legal.
+		m.mode = modeGroup
 		m.input = newPromptInput()
 		m.errMsg = ""
 		return m, textinput.Blink
+	case "J", "K":
+		dir := 1
+		if msg.String() == "K" {
+			dir = -1
+		}
+		if err := m.moveRow(dir); err != nil {
+			m.flashError(err)
+		}
+	case "l", "right":
+		m.vp.FocusViewport()
+	case "d":
+		m.vp.Detach()
+		m.refresh()
+	case "n":
+		return m.startCreate("")
+	case "z":
+		// One key per multiplexer beats a picker: `n` is the default (tmux),
+		// `z` is zellij. Nothing to discover, nothing to cycle. `z` simply
+		// isn't offered when zellij isn't installed.
+		if !zellijPresent {
+			m.flashError(fmt.Errorf("zellij not installed"))
+			return m, nil
+		}
+		return m.startCreate("zellij")
 	case "x":
 		if vis := m.visible(); m.cursor < len(vis) {
 			m.mode = modeKillConfirm
 			m.killTarget = vis[m.cursor].sess
 			m.killBackend = vis[m.cursor].backend
+			m.killGroup = vis[m.cursor].isGroup
 			m.errMsg = ""
 		}
 	case "/":
@@ -241,8 +319,28 @@ func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		name := m.input.Value()
+		backend := m.createBackend
 		m.mode = modeNormal
-		if err := m.createSession(name); err != nil {
+		if err := m.createSession(name, backend); err != nil {
+			m.flashError(err)
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// updateGroupKey handles keys while typing a new group name (`a`).
+func (m railModel) updateGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeNormal
+		return m, nil
+	case "enter":
+		name := m.input.Value()
+		m.mode = modeNormal
+		if err := m.createGroup(name); err != nil {
 			m.flashError(err)
 		}
 		return m, nil
@@ -256,10 +354,16 @@ func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m railModel) updateKillConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
-		target, backend := m.killTarget, m.killBackend
+		target, backend, isGroup := m.killTarget, m.killBackend, m.killGroup
 		m.mode = modeNormal
-		m.killTarget, m.killBackend = "", ""
-		if err := m.killSession(target, backend); err != nil {
+		m.killTarget, m.killBackend, m.killGroup = "", "", false
+		var err error
+		if isGroup {
+			err = m.deleteGroup(target)
+		} else {
+			err = m.killSession(target, backend)
+		}
+		if err != nil {
 			m.flashError(err)
 		}
 	case "n", "esc":
@@ -292,8 +396,7 @@ func (m railModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if idx == m.cursor {
 			if vis := m.visible(); idx < len(vis) {
-				m.pointRow(vis[idx])
-				m.refresh()
+				m.activateRow(vis[idx])
 			}
 			return m, nil
 		}
@@ -302,20 +405,13 @@ func (m railModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// rowAt maps a screen line to a visible-row index, mirroring the View's
-// layout math (title + blank above the tree, scroll indicators at the edges).
+// rowAt maps a screen line to a visible-row index. It is the inverse of what
+// View draws, so it reads treeTop/treeHeight from the same place View does —
+// see the note on treeHeight.
 func (m railModel) rowAt(y int) (int, bool) {
 	vis := m.visible()
-	height := m.height
-	if height <= 0 {
-		height = 24
-	}
-	treeHeight := height - 4
-	if treeHeight < 1 {
-		treeHeight = 1
-	}
-	start, end, moreUp, _ := scrollWindow(len(vis), treeHeight, m.cursor)
-	line := y - 2 // rows begin below the title and blank line
+	start, end, moreUp, _ := scrollWindow(len(vis), m.treeHeight(), m.cursor)
+	line := y - treeTop
 	if moreUp > 0 {
 		line-- // first tree line is the ↑ indicator
 	}
@@ -367,12 +463,40 @@ func (m railModel) errorActive() bool {
 	return m.errMsg != "" && time.Now().Before(m.errUntil)
 }
 
-// createSession creates a plain tmux session and points the viewport at it
-// (Task 9). Exported behavior via the `n` key.
-func (m *railModel) createSession(name string) error {
+// startCreate opens the new-session prompt targeting one backend.
+func (m railModel) startCreate(backend string) (tea.Model, tea.Cmd) {
+	m.mode = modeCreate
+	m.input = newPromptInput()
+	m.createBackend = backend
+	m.errMsg = ""
+	return m, textinput.Blink
+}
+
+// backendLabel names a backend for the prompt ("" = tmux).
+func backendLabel(backend string) string {
+	if backend == "" {
+		return "tmux"
+	}
+	return backend
+}
+
+// createSession creates a session on the given backend ("" = tmux) and points
+// the viewport at it (Task 9). Exposed via the `n` key; tab cycles backends,
+// so a zellij-only box can still create — the multi-backend promise has to
+// hold for making sessions, not just for listing them.
+func (m *railModel) createSession(name, backend string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("name required")
+	}
+	if backend != "" {
+		if err := createAux(backend, name); err != nil {
+			return err
+		}
+		m.refresh()
+		m.vp.PointAux(backend, name)
+		m.refresh()
+		return nil
 	}
 	dir, err := os.UserHomeDir()
 	if err != nil || dir == "" {
@@ -382,35 +506,28 @@ func (m *railModel) createSession(name string) error {
 		return err
 	}
 	m.refresh()
-	m.vp.point(name, "", false)
+	m.vp.Point(name, "", false)
 	m.refresh()
 	return nil
 }
 
-// killSession kills a session by name; if it held the viewport lock, the
-// viewport goes idle (Task 9, `x` key).
+// killSession kills a session by name; the viewport cleans up its shadow and
+// goes idle if it held the lock (Task 9, `x` key).
 func (m *railModel) killSession(name, backend string) error {
 	if backend != "" {
 		if err := killAux(backend, name); err != nil {
 			return err
 		}
-		if m.vp.lockBackend == backend && m.vp.lockSess == name {
-			m.vp.idle()
-		}
+		m.vp.OnKill(name, backend)
+		m.forgetMember(memberKey(backend, name))
 		m.refresh()
 		return nil
 	}
 	if err := tmux.Run("kill-session", "-t", "="+name); err != nil {
 		return err
 	}
-	if m.vp.lockSess == name {
-		// A grouped shadow would otherwise survive and keep the killed
-		// session's windows alive in its group.
-		if m.vp.grouped {
-			tmux.Run("kill-session", "-t", "="+gmViewPrefix+name)
-		}
-		m.vp.idle()
-	}
+	m.vp.OnKill(name, "")
+	m.forgetMember(memberKey("", name))
 	m.refresh()
 	return nil
 }
@@ -425,22 +542,10 @@ func (m *railModel) refresh() {
 	if m.done != nil {
 		m.done.observe(windows, m.hub, m.suppressDone)
 	}
-	// Follow the viewport's client: ctrl+b navigation inside the inner
-	// session changes its active window — the lock tracks it so ▸, heal,
-	// and the cursor all point at what the viewport actually shows. When
-	// grouped, the shadow session carries the viewport's own focus.
-	// Aux backends have no observable window focus; nothing to sync.
-	if m.vp.lockSess != "" && m.vp.lockBackend == "" {
-		target := m.vp.attachTarget()
-		for _, w := range windows {
-			if w.Session == target && w.Active {
-				m.vp.lockWin = w.Index
-				break
-			}
-		}
-	}
-	m.rows = buildRows(m.hub, m.viewState(), sessions, windows)
-	m.rows = append(m.rows, auxRows(auxSessions(), m.viewState())...)
+	m.vp.SyncActiveWindow(windows)
+	m.rows = buildRows(m.hub, m.vp.Lock(), sessions, windows)
+	m.rows = append(m.rows, auxRows(m.visibleAux(auxSessions()), m.vp.Lock())...)
+	m.rows = applyGroups(m.rows, m.groups)
 	m.followViewport()
 }
 
@@ -449,21 +554,22 @@ func (m *railModel) refresh() {
 // scrolls/highlights the rail live, while leaving the cursor alone when the
 // user is browsing other rows with j/k.
 func (m *railModel) followViewport() {
-	if m.vp.lockSess == "" {
+	lock := m.vp.Lock()
+	if lock.Sess == "" {
 		m.lastViewed = ""
 		return
 	}
-	key := m.vp.lockSess + ":" + m.vp.lockWin
+	key := lock.Sess + ":" + lock.Win
 	if key == m.lastViewed {
 		return
 	}
 	m.lastViewed = key
 	best := -1
 	for i, r := range m.visible() {
-		if r.sess != m.vp.lockSess {
+		if r.sess != lock.Sess {
 			continue
 		}
-		if r.flat || (r.depth == 1 && r.window == m.vp.lockWin) {
+		if r.flat || (r.depth == 1 && r.window == lock.Win) {
 			best = i
 			break
 		}
@@ -476,20 +582,30 @@ func (m *railModel) followViewport() {
 	}
 }
 
-// viewState is the viewport's current lock, used for inView marks and done
-// suppression.
-func (m railModel) viewState() viewState {
-	return viewState{lockSess: m.vp.lockSess, lockWin: m.vp.lockWin, lockBackend: m.vp.lockBackend}
+// activateRow is what ↵ and a second click on the selected row both do: view a
+// session, fold a group. One method, because the keyboard and the mouse
+// disagreeing is a bug the user finds and the tests don't — a click on a group
+// used to try attaching to a session named after it.
+func (m *railModel) activateRow(r railRow) {
+	if r.isGroup {
+		m.toggleFold(r)
+		return
+	}
+	m.pointRow(r)
+	m.refresh()
 }
 
 // pointRow routes a row selection to the right backend's viewport attach.
 func (m *railModel) pointRow(r railRow) {
+	if r.isGroup {
+		return // a group is a shelf: there is nothing behind it to attach to
+	}
 	if r.backend != "" {
-		m.vp.pointAux(r.backend, r.sess)
+		m.vp.PointAux(r.backend, r.sess)
 		return
 	}
 	m.clearViewedDone(r)
-	m.vp.point(r.sess, r.window, r.attached)
+	m.vp.Point(r.sess, r.window, r.attached)
 }
 
 // suppressDone reports whether a window's done mark should be withheld because
@@ -498,7 +614,8 @@ func (m railModel) suppressDone(sess, window string) bool {
 	if m.attached[sess] {
 		return true
 	}
-	if m.vp.lockSess == sess && (m.vp.lockWin == "" || m.vp.lockWin == window) {
+	lock := m.vp.Lock()
+	if lock.Sess == sess && (lock.Win == "" || lock.Win == window) {
 		return true
 	}
 	return false

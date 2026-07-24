@@ -8,6 +8,7 @@ package rail
 // earn features by proving data, never by faked parity.
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -61,16 +62,57 @@ func auxSessions() []auxSession {
 
 // auxRows renders backend sessions as flat rail rows: name + backend as the
 // dim suffix, marks only for what the backend proves (zellij: the ▸ lock).
-func auxRows(aux []auxSession, v viewState) []railRow {
+func auxRows(aux []auxSession, v ViewState) []railRow {
 	var rows []railRow
 	for _, s := range aux {
 		rows = append(rows, railRow{
 			depth: 0, flat: true, label: s.name, sess: s.name,
 			backend: s.backend, cmd: s.backend,
-			inView: v.lockBackend == s.backend && v.lockSess == s.name,
+			inView: v.Backend == s.backend && v.Sess == s.name,
 		})
 	}
 	return rows
+}
+
+// backends returns the multiplexers available to create on, tmux first ("").
+// The `n` prompt only offers a choice when there is genuinely one to make.
+func backends() []string {
+	out := []string{""}
+	if !tmuxPresent() {
+		out = out[:0]
+	}
+	if zellijPresent {
+		out = append(out, "zellij")
+	}
+	if len(out) == 0 {
+		out = []string{""} // nothing detected: tmux is still the honest default
+	}
+	return out
+}
+
+// tmuxPresent reports whether tmux is installed; injectable for tests.
+var tmuxPresent = func() bool { _, err := exec.LookPath("tmux"); return err == nil }
+
+// createAux creates a session on a non-tmux backend without attaching to it —
+// the rail's viewport does the attaching. Injectable for tests.
+var createAux = func(backend, name string) error {
+	switch backend {
+	case "zellij":
+		return exec.Command("zellij", "attach", "--create-background", name).Run()
+	}
+	return fmt.Errorf("unknown backend %q", backend)
+}
+
+// AuxSessionExists reports whether a non-tmux backend still lists sess. It is
+// the loop guard for a hosting frame's heal: a viewport whose child died
+// because its session was killed must go idle, never re-attach forever.
+func AuxSessionExists(backend, sess string) bool {
+	for _, a := range auxSessions() {
+		if a.backend == backend && a.name == sess {
+			return true
+		}
+	}
+	return false
 }
 
 // killAux kills a session on a non-tmux backend; injectable for tests.
@@ -80,4 +122,16 @@ var killAux = func(backend, name string) error {
 		return exec.Command("zellij", "kill-session", name).Run()
 	}
 	return nil
+}
+
+// HasBackend reports whether a non-tmux backend is installed, so a frame never
+// advertises a key that could only produce an error.
+func HasBackend(name string) bool {
+	switch name {
+	case "zellij":
+		return zellijPresent
+	case "", "tmux":
+		return tmuxPresent()
+	}
+	return false
 }

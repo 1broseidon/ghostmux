@@ -6,6 +6,10 @@ package rail
 
 const railWidth = 30 // cols 1-30 (matches `split-window -hbf -l 30`)
 
+// Width is the rail's fixed column count, exported for hosting frames: classic
+// enforces it on a tmux pane, solo allocates it in its own layout.
+const Width = railWidth
+
 // truncateLabel truncates s to at most width runes, replacing the tail with
 // "…" (U+2026) when it doesn't fit. width<=0 yields "". A width of 1 yields
 // "…" itself (no room for content).

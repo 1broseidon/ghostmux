@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
@@ -14,10 +16,10 @@ import (
 func TestKeyHelpCoversBoundKeys(t *testing.T) {
 	// boundKeys mirrors updateNormalKey's switch cases exactly; keep the two
 	// lists in sync when the keymap changes.
-	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?", "l", "right"}
+	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?", "l", "right", "z"}
 
 	var haystack strings.Builder
-	for _, k := range keyHelpTable {
+	for _, k := range keyHelpRows() {
 		haystack.WriteString(strings.ToLower(k.key))
 		haystack.WriteByte(' ')
 	}
@@ -39,17 +41,17 @@ func TestKeyHelpCoversBoundKeys(t *testing.T) {
 			t.Errorf("bound key %q (needle %q) not documented in keyHelpTable", key, needle)
 		}
 	}
-	if len(keyHelpTable) < 11 {
-		t.Errorf("keyHelpTable has %d entries, want >= 11 (screen-6 keymap minus the removed `a`)", len(keyHelpTable))
+	if len(keyHelpRows()) < 11 {
+		t.Errorf("keyHelpTable has %d entries, want >= 11 (screen-6 keymap minus the removed `a`)", len(keyHelpRows()))
 	}
 }
 
 func TestPlainFilteredDimsNonMatchingInPlace(t *testing.T) {
 	rows := []railRow{
 		{depth: 0, sess: "gm-agent-00", label: "gm-agent-00"},
-		{depth: 1, sess: "gm-agent-00", label: "1:claude", active: true},
+		{depth: 1, isWin: true, sess: "gm-agent-00", label: "1:claude", active: true},
 		{depth: 0, sess: "alpha", label: "alpha"},
-		{depth: 1, sess: "alpha", label: "1:zsh", active: true},
+		{depth: 1, isWin: true, sess: "alpha", label: "1:zsh", active: true},
 	}
 	var plainOut, filteredOut []string
 	for _, r := range rows {
@@ -86,7 +88,7 @@ func TestCmdOnceFilterMatchesSpecExample(t *testing.T) {
 		"list-windows": "alpha\t1\tzsh\t1\t0\t0\t0\n" +
 			"gm-agent-00\t1\tclaude\t1\t0\t0\t0\n",
 	})
-	rows := railRows("", viewState{})
+	rows := railRows("", ViewState{})
 	var dimmed []string
 	for _, r := range rows {
 		if strings.HasPrefix(r.plainFiltered("agent"), "·") {
@@ -105,10 +107,10 @@ func TestCmdOnceFilterMatchesSpecExample(t *testing.T) {
 
 func TestCreateSessionRequiresName(t *testing.T) {
 	m := &railModel{}
-	if err := m.createSession("   "); err == nil {
+	if err := m.createSession("   ", ""); err == nil {
 		t.Errorf("expected error for blank name")
 	}
-	if err := m.createSession(""); err == nil {
+	if err := m.createSession("", ""); err == nil {
 		t.Errorf("expected error for empty name")
 	}
 }
@@ -122,8 +124,8 @@ func TestCreateSessionRunsTmuxAndPointsViewport(t *testing.T) {
 	}
 	t.Cleanup(func() { tmux.Runner = orig })
 
-	m := &railModel{vp: viewport{pane: "%1", idleCmd: "ghostmux rail idle"}}
-	if err := m.createSession("myproj"); err != nil {
+	m := &railModel{vp: &fakeViewport{}}
+	if err := m.createSession("myproj", ""); err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 	found := false
@@ -135,8 +137,8 @@ func TestCreateSessionRunsTmuxAndPointsViewport(t *testing.T) {
 	if !found {
 		t.Errorf("expected a `new-session -d -s myproj ...` call, got %v", calls)
 	}
-	if m.vp.lockSess != "myproj" {
-		t.Errorf("viewport not pointed at new session: lockSess=%q", m.vp.lockSess)
+	if m.vp.Lock().Sess != "myproj" {
+		t.Errorf("viewport not pointed at new session: lockSess=%q", m.vp.Lock().Sess)
 	}
 }
 
@@ -151,7 +153,7 @@ func TestCreateSessionPropagatesTmuxError(t *testing.T) {
 	t.Cleanup(func() { tmux.Runner = orig })
 
 	m := &railModel{}
-	if err := m.createSession("myproj"); err == nil {
+	if err := m.createSession("myproj", ""); err == nil {
 		t.Errorf("expected tmux error to propagate")
 	}
 }
@@ -178,12 +180,12 @@ func TestKillSessionIdlesViewportIfLocked(t *testing.T) {
 	}
 	t.Cleanup(func() { tmux.Runner = orig })
 
-	m := &railModel{vp: viewport{pane: "%1", idleCmd: "ghostmux rail idle", lockSess: "alpha"}}
+	m := &railModel{vp: &fakeViewport{}}
 	if err := m.killSession("alpha", ""); err != nil {
 		t.Fatalf("killSession: %v", err)
 	}
-	if m.vp.lockSess != "" {
-		t.Errorf("viewport should have gone idle, lockSess=%q", m.vp.lockSess)
+	if m.vp.Lock().Sess != "" {
+		t.Errorf("viewport should have gone idle, lockSess=%q", m.vp.Lock().Sess)
 	}
 	found := false
 	for _, c := range calls {
@@ -201,12 +203,12 @@ func TestKillSessionLeavesUnrelatedViewportAlone(t *testing.T) {
 	tmux.Runner = func(args ...string) (string, error) { return "", nil }
 	t.Cleanup(func() { tmux.Runner = orig })
 
-	m := &railModel{vp: viewport{pane: "%1", idleCmd: "x", lockSess: "other"}}
+	m := &railModel{vp: &fakeViewport{lock: ViewState{Sess: "other"}}}
 	if err := m.killSession("alpha", ""); err != nil {
 		t.Fatalf("killSession: %v", err)
 	}
-	if m.vp.lockSess != "other" {
-		t.Errorf("unrelated viewport lock changed: %q", m.vp.lockSess)
+	if m.vp.Lock().Sess != "other" {
+		t.Errorf("unrelated viewport lock changed: %q", m.vp.Lock().Sess)
 	}
 }
 
@@ -241,7 +243,7 @@ func TestAuxSessionsParseZellij(t *testing.T) {
 	if len(aux) != 2 || aux[0].name != "alpha" || aux[1].name != "gamma" {
 		t.Fatalf("auxSessions = %+v, want alpha+gamma only", aux)
 	}
-	rows := auxRows(aux, viewState{lockBackend: "zellij", lockSess: "gamma"})
+	rows := auxRows(aux, ViewState{Backend: "zellij", Sess: "gamma"})
 	if !rows[1].inView || rows[0].inView {
 		t.Errorf("inView marks wrong: %+v", rows)
 	}
@@ -250,5 +252,127 @@ func TestAuxSessionsParseZellij(t *testing.T) {
 	}
 	if rows[0].cmd != "zellij" || !rows[0].flat {
 		t.Errorf("zellij row rendering fields wrong: %+v", rows[0])
+	}
+}
+
+// TestInHostExcludesOwnSession: a standalone frame relaunched inside a
+// multiplexer session must not list its own host — selecting that row would
+// render the frame inside itself. This is what makes `tmux new -A -s gm
+// ghostmux solo` (resume for free) safe.
+func TestInHostExcludesOwnSession(t *testing.T) {
+	withFakeRunner(t, map[string]string{
+		"list-sessions": "alpha\t0\ngm\t1\n",
+		"list-windows": "alpha\t1\tzsh\t1\t0\t0\t0\n" +
+			"gm\t1\tghostmux\t1\t0\t0\t0\n",
+	})
+	m := New(&fakeViewport{}).InHost("", "gm")
+	for _, r := range m.rows {
+		if r.sess == "gm" {
+			t.Errorf("rail listed its own host session: %+v", r)
+		}
+	}
+	if len(m.rows) == 0 {
+		t.Errorf("host exclusion removed every row")
+	}
+}
+
+// TestInHostExcludesOwnAuxSession is the same guarantee on a non-tmux host.
+func TestInHostExcludesOwnAuxSession(t *testing.T) {
+	origList, origPresent := zellijList, zellijPresent
+	zellijPresent = true
+	zellijList = func() (string, error) { return "gm [Created 1m ago]\nother [Created 2m ago]\n", nil }
+	t.Cleanup(func() { zellijList, zellijPresent = origList, origPresent })
+
+	m := New(&fakeViewport{}).InHost("zellij", "gm")
+	got := m.visibleAux(auxSessions())
+	if len(got) != 1 || got[0].name != "other" {
+		t.Errorf("visibleAux = %+v, want only [other]", got)
+	}
+}
+
+// TestCreateRoutesToZellijBackend: the multi-backend promise has to hold for
+// making sessions, not just listing them — on a zellij-only box `n` must work.
+func TestCreateRoutesToZellijBackend(t *testing.T) {
+	var created []string
+	origCreate, origPresent := createAux, zellijPresent
+	zellijPresent = true
+	createAux = func(backend, name string) error {
+		created = append(created, backend+":"+name)
+		return nil
+	}
+	t.Cleanup(func() { createAux, zellijPresent = origCreate, origPresent })
+
+	origRunner := tmux.Runner
+	tmux.Runner = func(args ...string) (string, error) {
+		if args[0] == "new-session" {
+			t.Errorf("zellij create fell through to tmux: %v", args)
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { tmux.Runner = origRunner })
+
+	m := &railModel{vp: &fakeViewport{}}
+	if err := m.createSession("myz", "zellij"); err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if len(created) != 1 || created[0] != "zellij:myz" {
+		t.Errorf("createAux calls = %v, want [zellij:myz]", created)
+	}
+	if lock := m.vp.Lock(); lock.Backend != "zellij" || lock.Sess != "myz" {
+		t.Errorf("viewport not pointed at the new zellij session: %+v", lock)
+	}
+}
+
+// TestBackendKeysMatchWhatIsInstalled: `n` is tmux and `z` is zellij — one
+// key per multiplexer, no picker. `z` must not be offered on a box without
+// zellij, or the key would only ever produce an error.
+func TestBackendKeysMatchWhatIsInstalled(t *testing.T) {
+	origTmux, origZellij := tmuxPresent, zellijPresent
+	t.Cleanup(func() { tmuxPresent, zellijPresent = origTmux, origZellij })
+
+	tmuxPresent, zellijPresent = func() bool { return true }, false
+	if HasBackend("zellij") {
+		t.Errorf("zellij advertised while not installed")
+	}
+	if !HasBackend("tmux") {
+		t.Errorf("tmux not advertised while installed")
+	}
+	tmuxPresent, zellijPresent = func() bool { return false }, true
+	if got := backends(); len(got) != 1 || got[0] != "zellij" {
+		t.Errorf("zellij-only: backends() = %v, want [zellij]", got)
+	}
+	if !HasBackend("zellij") {
+		t.Errorf("zellij not advertised while installed")
+	}
+}
+
+// TestZKeyIsInertWithoutZellij: pressing z on a tmux-only box must flash an
+// error, never open a prompt that cannot succeed.
+func TestZKeyIsInertWithoutZellij(t *testing.T) {
+	origZellij := zellijPresent
+	zellijPresent = false
+	t.Cleanup(func() { zellijPresent = origZellij })
+
+	m := railModel{vp: &fakeViewport{}, collapsed: map[string]bool{}}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	got := next.(railModel)
+	if got.mode == modeCreate {
+		t.Errorf("z opened a create prompt with zellij absent")
+	}
+	if !got.errorActive() {
+		t.Errorf("z gave no feedback with zellij absent")
+	}
+}
+
+// TestNKeyCreatesOnTmux pins the default: n is tmux, always.
+func TestNKeyCreatesOnTmux(t *testing.T) {
+	m := railModel{vp: &fakeViewport{}, collapsed: map[string]bool{}}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	got := next.(railModel)
+	if got.mode != modeCreate {
+		t.Fatalf("n did not open the create prompt")
+	}
+	if got.createBackend != "" {
+		t.Errorf("n targeted %q, want tmux (\"\")", got.createBackend)
 	}
 }

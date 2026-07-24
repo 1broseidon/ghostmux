@@ -11,7 +11,7 @@ import (
 const (
 	hexTitleAccent  = "#fe8019" // ▍ / running / in-view ▸
 	hexTitleName    = "#8ec07c" // "ghostmux" / in-view session name
-	hexTitleTail    = "#928374" // " ▸ rail" / hints / dim / collapse arrows
+	hexTitleTail    = "#928374" // hints / dim / collapse arrows
 	hexSessionName  = "#ebdbb2" // session name, not in view
 	hexAttached     = "#b8bb26" // attached ● / active window / done ✓
 	hexBell         = "#fb4934" // bell ● / errors / kill confirm y
@@ -30,8 +30,30 @@ var (
 	styBell        = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell)).Bold(true)
 	styError       = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell))
 	styActivity    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexActivity))
-	styDim         = lipgloss.NewStyle().Foreground(lipgloss.Color(hexCursorBg))
 )
+
+// treeTop is the screen line the tree's first row is drawn on. There is no
+// title row — the rail is 30 columns of scarce vertical space and a banner
+// naming the program you just launched earns none of it — so the tree starts
+// at the very top.
+const treeTop = 0
+
+// treeHeight is how many lines the tree gets: everything except the blank
+// separator and the hint line beneath it.
+//
+// View() and rowAt() MUST agree on this and on treeTop. They are the same
+// layout expressed twice — once to draw and once to hit-test — and when they
+// drifted apart, every click landed two rows off.
+func (m railModel) treeHeight() int {
+	h := m.height
+	if h <= 0 {
+		h = 24
+	}
+	if th := h - 2; th >= 1 {
+		return th
+	}
+	return 1
+}
 
 // rowStyle returns the styling primitive for one colored run of text within a
 // row: fg color, optional bold, and — for the selected row — the cursor bar's
@@ -52,17 +74,13 @@ func (m railModel) View() string {
 	if height <= 0 {
 		height = 24
 	}
-	treeHeight := height - 4
-	if treeHeight < 1 {
-		treeHeight = 1
-	}
+	treeHeight := m.treeHeight()
 
 	if m.helpView {
 		return helpPage(height)
 	}
 
 	var b strings.Builder
-	b.WriteString(m.titleLine() + "\n\n")
 
 	vis := m.visible()
 	if len(vis) == 0 {
@@ -75,12 +93,12 @@ func (m railModel) View() string {
 	return b.String()
 }
 
-// titleLine renders row 1: ▍ ghostmux ▸ rail, with an attention summary
-// (●N bells, ✓N done) right-aligned when there is anything to report.
-func (m railModel) titleLine() string {
-	left := " " + styTitleAccent.Render("▍") + styTitleName.Render("ghostmux") + styTitleTail.Render(" ▸ rail")
-	leftWidth := 1 + 1 + len("ghostmux") + len(" ▸ rail")
+// AttentionSummary is the fleet's unread state: how many sessions carry a bell
+// and how many finished a command unseen. The hosting frame renders it in its
+// own chrome (solo's bottom bar); the classic rail falls back to its hint line.
+func (m Model) AttentionSummary() (bells, done int) { return m.attention() }
 
+func (m railModel) attention() (int, int) {
 	var nBell, nDone int
 	for _, r := range m.rows {
 		if r.depth == 0 { // count once per session, aggregates included
@@ -92,26 +110,29 @@ func (m railModel) titleLine() string {
 			}
 		}
 	}
-	summary, sumWidth := "", 0
+	return nBell, nDone
+}
+
+// attentionText renders the summary as styled text plus its display width, or
+// ("", 0) when the fleet is quiet — nothing to report means nothing drawn.
+func (m railModel) attentionText() (string, int) {
+	nBell, nDone := m.attention()
+	out, w := "", 0
 	if nBell > 0 {
 		s := "●" + itoa(nBell)
-		summary += styBell.Render(s)
-		sumWidth += len([]rune(s))
+		out += styBell.Render(s)
+		w += len([]rune(s))
 	}
 	if nDone > 0 {
 		s := "✓" + itoa(nDone)
-		if summary != "" {
-			summary += " "
-			sumWidth++
+		if out != "" {
+			out += " "
+			w++
 		}
-		summary += rowStyle(hexAttached, false, false).Render(s)
-		sumWidth += len([]rune(s))
+		out += rowStyle(hexAttached, false, false).Render(s)
+		w += len([]rune(s))
 	}
-	if summary == "" {
-		return left
-	}
-	pad := max0(railWidth - 1 - leftWidth - sumWidth)
-	return left + strings.Repeat(" ", pad) + summary
+	return out, w
 }
 
 // hintLine renders the bottom row, which becomes a live prompt in filter,
@@ -121,9 +142,19 @@ func (m railModel) hintLine() string {
 	case modeFilter:
 		return " " + styActivity.Render("/") + m.input.View()
 	case modeCreate:
-		return " " + styHint.Render("new: ") + m.input.View()
+		// Always name the backend being created on: `n` and `z` are different
+		// keys, so the prompt must say which one you pressed.
+		return " " + styHint.Render("new "+backendLabel(m.createBackend)+": ") + m.input.View()
+	case modeGroup:
+		return " " + styHint.Render("group: ") + m.input.View()
 	case modeKillConfirm:
-		return " " + styHint.Render("kill "+m.killTarget+"? ") + styBell.Render("y") + styHint.Render("/n")
+		// Deleting a group is not killing anything: say so, or the confirm
+		// prompt reads like it is about to destroy sessions.
+		verb := "kill "
+		if m.killGroup {
+			verb = "ungroup "
+		}
+		return " " + styHint.Render(verb+m.killTarget+"? ") + styBell.Render("y") + styHint.Render("/n")
 	}
 	if m.errorActive() {
 		return " " + styError.Render(m.errMsg)
@@ -131,9 +162,9 @@ func (m railModel) hintLine() string {
 	if m.viewportDead {
 		return " " + styHint.Render("↵ re-point viewport")
 	}
-	key := func(s string) string { return rowStyle(hexActivity, false, false).Render(s) }
-	sep := styHint.Render(" · ")
-	return " " + key("j/k") + styHint.Render(" move") + sep + key("↵") + styHint.Render(" view") + sep + key("?") + styHint.Render(" help")
+	// The frame draws the keymap and the attention summary in its bottom bar;
+	// duplicating them here would spend the rail's last row on nothing.
+	return ""
 }
 
 // emptyStateBody renders the mockup screen-4 rail body when the tree is
@@ -218,18 +249,33 @@ func itoa(n int) string {
 func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) string {
 	dim := filterQuery != "" && !matchesFilter(r, filterQuery)
 
-	indent := "     " // window rows: 5-col indent
-	arrow := ""
+	// Three levels in 30 columns: a group folder, its sessions, their windows.
+	// Indents stay tight (1/3/5) because every column spent here is a column
+	// taken from the name, which is the part you actually read.
+	indent, arrow := " ", ""
 	switch {
-	case r.flat:
-		arrow = "  " // no disclosure; keep names column-aligned with ▾ rows
-		indent = " "
-	case r.depth == 0:
+	case r.isGroup:
 		arrow = "▾ "
 		if r.collapsed {
 			arrow = "▸ "
 		}
-		indent = " "
+	case r.isWin:
+		indent = "     " // ungrouped windows
+		if r.group != "" {
+			indent = "       "
+		}
+	default: // session row
+		if r.group != "" {
+			indent = "   "
+		}
+		if r.flat {
+			arrow = "  " // no disclosure; keep names column-aligned with ▾ rows
+		} else {
+			arrow = "▾ "
+			if r.collapsed {
+				arrow = "▸ "
+			}
+		}
 	}
 	prefixWidth := len([]rune(indent)) + len([]rune(arrow))
 	labelWidth := railWidth - prefixWidth - railMarksWidth
@@ -238,7 +284,12 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 
 	suffix := ""
-	if r.depth == 0 && r.attached {
+	// A folded group must still report what it holds, or folding would hide
+	// exactly what the rail exists to surface.
+	if r.isGroup && r.collapsed && r.count > 0 {
+		suffix = " " + itoa(r.count)
+	}
+	if !r.isGroup && !r.isWin && r.attached {
 		suffix = " ●"
 	}
 	nameWidth := labelWidth - len([]rune(suffix))

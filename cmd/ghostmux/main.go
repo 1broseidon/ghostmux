@@ -1,32 +1,36 @@
 // ghostmux: attach-anywhere mission control for your multiplexers.
 //
-// The hub is itself a tmux session: a persistent rail (session tree + live
-// attention gutter) beside a viewport that renders whatever you select as a
-// nested client. Attach it from any terminal on any machine — ghostty,
-// iTerm2, an ssh box — and your cockpit is identical, because the whole
-// control surface lives in the multiplexer, never in the terminal.
+// Type `ghostmux` and you are in the panel: a persistent rail of every session
+// across every multiplexer you have installed, with a live attention gutter,
+// beside a viewport that renders whatever you select. ghostmux owns the outer
+// frame — it draws the rail itself and runs the selected session as a child on
+// a terminal it emulates in process. No outer tmux, no nesting, one status bar.
 //
-// Law of the rail: render evidence, never inference. Scope law: ship only
-// what the multiplexer alone can't give you.
+// The inner multiplexers keep everything worth keeping: persistence, session
+// truth, their own keymaps. The panel holds no state of its own, so it can be
+// killed and relaunched anywhere and rebuild the same cockpit from what the
+// multiplexers report.
+//
+// Law of the rail: render evidence, never inference. Scope law: ship only what
+// the multiplexer alone can't give you.
 package main
 
 import (
 	"fmt"
 	"os"
 
+	"github.com/1broseidon/ghostmux/internal/app"
 	"github.com/1broseidon/ghostmux/internal/rail"
 	"github.com/1broseidon/ghostmux/internal/wiring"
 )
 
 func main() {
-	// Bare `ghostmux` IS the product: log in, type it, you're in the hub.
+	// Bare `ghostmux` IS the product: log in, type it, you're in the panel.
 	if len(os.Args) < 2 {
-		exit(wiring.CmdHub(nil))
+		exit(app.Run(nil))
 	}
 	var err error
 	switch os.Args[1] {
-	case "hub":
-		err = wiring.CmdHub(os.Args[2:])
 	case "up":
 		err = wiring.CmdUp(os.Args[2:])
 	case "ls":
@@ -35,8 +39,6 @@ func main() {
 		err = wiring.CmdDoctor()
 	case "rail":
 		err = rail.CmdRail(os.Args[2:])
-	case "ghostty":
-		err = wiring.CmdGhostty(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -58,22 +60,25 @@ func exit(err error) {
 func usage() {
 	fmt.Print(`ghostmux — attach-anywhere mission control for your multiplexers
 
-Type ghostmux. You're in the hub: a persistent rail of every session with a
-live attention gutter, beside a viewport that renders whatever you select.
-The hub is itself a tmux session — ssh in from anywhere, same cockpit.
+Type ghostmux. You're in the panel: every session from every multiplexer you
+have installed, in one rail with a live attention gutter, beside a viewport
+that renders whatever you select. ghostmux owns the frame; tmux and zellij
+keep the sessions.
 
 usage:
-  ghostmux                  open the hub (create or attach)
-  ghostmux up <name> [dir]  attach a named session in place (create on demand)
-  ghostmux ls               list sessions
-  ghostmux doctor           diagnose the environment
-  ghostmux rail ...         rail internals (once/idle/help) — used by the hub
+  ghostmux             open the panel
+  ghostmux doctor      report what ghostmux can see
+  ghostmux ls          list tmux sessions
+  ghostmux up <name>   attach a named tmux session in place
+  ghostmux rail once   print one frame of the rail and exit (debugging)
 
-ghostty extras (optional, one terminal's integration):
-  ghostmux ghostty install    wire the unified ctrl+h/j/k/l nav keymap
-                              (ghostty splits -> tmux panes -> vim windows)
-  ghostmux ghostty uninstall  remove the wiring
+The panel holds no state: quit it, relaunch it anywhere, and it rebuilds the
+same cockpit from what the multiplexers report. Sessions are never yours to
+lose — ghostmux only ever draws them.
 
-Keys inside the hub: press ? for the keymap.
+Keys: press ? in the panel. The rail ⇄ viewport toggle is ctrl+\ or F12; two
+keys because a desktop environment can grab a chord before the terminal sees
+it, and a dead toggle reports no error. Override with GHOSTMUX_TOGGLE (a
+comma-separated list). ? always shows the key that is actually bound.
 `)
 }

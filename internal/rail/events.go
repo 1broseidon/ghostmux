@@ -38,30 +38,30 @@ var refreshHooks = []string{
 // refreshMsg is posted by the wait-for listener when any refresh hook fires.
 type refreshMsg struct{}
 
-// installHooks sets the 7 refresh hooks at index [133]. The run-shell command
+// InstallHooks sets the 7 refresh hooks at index [133]. The run-shell command
 // embeds the same socket args the rail uses (tmux.ArgvString) so the wait-for
 // signal reaches the SAME server the hooks fire on — the hooks run inside the
 // tmux server, not this process.
-func installHooks() {
+func InstallHooks() {
 	cmd := fmt.Sprintf("run-shell 'tmux%s wait-for -S %s'", tmux.ArgvString(), refreshSignal)
 	for _, h := range refreshHooks {
 		tmux.Run("set-hook", "-g", fmt.Sprintf("%s[%d]", h, hookIndex), cmd)
 	}
 }
 
-// removeHooks unsets exactly index [133] of each refresh hook, leaving any user
+// RemoveHooks unsets exactly index [133] of each refresh hook, leaving any user
 // hooks at other indices intact.
-func removeHooks() {
+func RemoveHooks() {
 	for _, h := range refreshHooks {
 		tmux.Run("set-hook", "-gu", fmt.Sprintf("%s[%d]", h, hookIndex))
 	}
 }
 
-// waitLoop blocks on `tmux wait-for ghostmux-refresh` and posts a refreshMsg
+// WaitLoop blocks on `tmux wait-for ghostmux-refresh` and posts a refreshMsg
 // for every signal, until ctx is cancelled. The blocking child is spawned with
 // CommandContext so cancelling ctx kills it — the goroutine and its tmux
 // process never outlive the rail.
-func waitLoop(ctx context.Context, p *tea.Program) {
+func WaitLoop(ctx context.Context, p *tea.Program) {
 	for {
 		if ctx.Err() != nil {
 			return

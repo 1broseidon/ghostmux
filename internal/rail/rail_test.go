@@ -39,7 +39,7 @@ func TestRailRows(t *testing.T) {
 	cases := []struct {
 		name    string
 		hub     string
-		view    viewState
+		view    ViewState
 		outputs map[string]string
 		want    []railRow
 	}{
@@ -53,8 +53,8 @@ func TestRailRows(t *testing.T) {
 			},
 			want: []railRow{
 				{depth: 0, label: "alpha", sess: "alpha", attached: false},
-				{depth: 1, label: "1:vim", sess: "alpha", window: "1", active: true},
-				{depth: 1, label: "2:shell", sess: "alpha", window: "2", active: false},
+				{depth: 1, isWin: true, label: "1:vim", sess: "alpha", window: "1", active: true},
+				{depth: 1, isWin: true, label: "2:shell", sess: "alpha", window: "2", active: false},
 				// single-window session: one flat row, window marks inherited
 				{depth: 0, flat: true, label: "beta", sess: "beta", window: "1", attached: true, active: true},
 			},
@@ -93,15 +93,15 @@ func TestRailRows(t *testing.T) {
 			// Session aggregates the single highest-priority mark (bell here).
 			want: []railRow{
 				{depth: 0, label: "s", sess: "s", bell: true},
-				{depth: 1, label: "1:one", sess: "s", window: "1", bell: true, active: true},
-				{depth: 1, label: "2:two", sess: "s", window: "2", act: true},
-				{depth: 1, label: "3:three", sess: "s", window: "3", done: true},
-				{depth: 1, label: "4:four", sess: "s", window: "4"},
+				{depth: 1, isWin: true, label: "1:one", sess: "s", window: "1", bell: true, active: true},
+				{depth: 1, isWin: true, label: "2:two", sess: "s", window: "2", act: true},
+				{depth: 1, isWin: true, label: "3:three", sess: "s", window: "3", done: true},
+				{depth: 1, isWin: true, label: "4:four", sess: "s", window: "4"},
 			},
 		},
 		{
 			name: "inView mark on locked window and its session",
-			view: viewState{lockSess: "s", lockWin: "2"},
+			view: ViewState{Sess: "s", Win: "2"},
 			outputs: map[string]string{
 				"list-sessions": "s\t0\n",
 				"list-windows": "s\t1\tone\t1\t0\t0\t0\n" +
@@ -109,13 +109,13 @@ func TestRailRows(t *testing.T) {
 			},
 			want: []railRow{
 				{depth: 0, label: "s", sess: "s", inView: true},
-				{depth: 1, label: "1:one", sess: "s", window: "1", active: true},
-				{depth: 1, label: "2:two", sess: "s", window: "2", inView: true},
+				{depth: 1, isWin: true, label: "1:one", sess: "s", window: "1", active: true},
+				{depth: 1, isWin: true, label: "2:two", sess: "s", window: "2", inView: true},
 			},
 		},
 		{
 			name: "whole-session lock marks the active window inView",
-			view: viewState{lockSess: "s", lockWin: ""},
+			view: ViewState{Sess: "s", Win: ""},
 			outputs: map[string]string{
 				"list-sessions": "s\t0\n",
 				"list-windows": "s\t1\tone\t1\t0\t0\t0\n" +
@@ -123,8 +123,8 @@ func TestRailRows(t *testing.T) {
 			},
 			want: []railRow{
 				{depth: 0, label: "s", sess: "s", inView: true},
-				{depth: 1, label: "1:one", sess: "s", window: "1", active: true, inView: true},
-				{depth: 1, label: "2:two", sess: "s", window: "2"},
+				{depth: 1, isWin: true, label: "1:one", sess: "s", window: "1", active: true, inView: true},
+				{depth: 1, isWin: true, label: "2:two", sess: "s", window: "2"},
 			},
 		},
 		{
@@ -183,17 +183,17 @@ func TestRailRowPlain(t *testing.T) {
 		},
 		{
 			name: "active window row",
-			row:  railRow{depth: 1, label: "1:vim", active: true},
+			row:  railRow{depth: 1, isWin: true, label: "1:vim", active: true},
 			want: "  *   1:vim",
 		},
 		{
 			name: "window row with bell gutter",
-			row:  railRow{depth: 1, label: "1:vim", bell: true},
+			row:  railRow{depth: 1, isWin: true, label: "1:vim", bell: true},
 			want: "   ●  1:vim",
 		},
 		{
 			name: "window row with done gutter",
-			row:  railRow{depth: 1, label: "1:vim", done: true},
+			row:  railRow{depth: 1, isWin: true, label: "1:vim", done: true},
 			want: "   ✓  1:vim",
 		},
 	}
@@ -350,8 +350,8 @@ func TestClearViewedDone(t *testing.T) {
 	// and for a session row via its active window.
 	rows := []railRow{
 		{depth: 0, label: "work", sess: "work"},
-		{depth: 1, label: "1:one", sess: "work", window: "1", active: false},
-		{depth: 1, label: "2:two", sess: "work", window: "2", active: true},
+		{depth: 1, isWin: true, label: "1:one", sess: "work", window: "1", active: false},
+		{depth: 1, isWin: true, label: "2:two", sess: "work", window: "2", active: true},
 	}
 	cases := []struct {
 		name string
@@ -380,7 +380,7 @@ func TestClearViewedDone(t *testing.T) {
 func TestSuppressDone(t *testing.T) {
 	m := railModel{
 		attached: map[string]bool{"att": true},
-		vp:       viewport{lockSess: "view", lockWin: "2"},
+		vp:       &fakeViewport{lock: ViewState{Sess: "view", Win: "2"}},
 	}
 	cases := []struct {
 		sess, window string
@@ -397,7 +397,7 @@ func TestSuppressDone(t *testing.T) {
 		}
 	}
 	// whole-session lock suppresses every window of that session
-	m.vp = viewport{lockSess: "whole", lockWin: ""}
+	m.vp = &fakeViewport{lock: ViewState{Sess: "whole"}}
 	if !m.suppressDone("whole", "9") {
 		t.Errorf("whole-session lock should suppress any window")
 	}
@@ -425,7 +425,7 @@ func TestGHOSTMUXTmuxArgsPrepended(t *testing.T) {
 	}
 	t.Cleanup(func() { tmux.Runner = orig })
 
-	railRows("", viewState{})
+	railRows("", ViewState{})
 
 	if len(seen) == 0 {
 		t.Fatal("railRows made no tmux.Runner calls")

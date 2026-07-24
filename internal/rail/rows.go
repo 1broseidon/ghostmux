@@ -11,7 +11,13 @@ import (
 // attention marks are booleans; the 2-char gutter is derived from them by
 // priority (bell > done > activity > in-viewport).
 type railRow struct {
-	depth     int // 0 session, 1 window
+	depth int // tree level: group 0, its sessions 1, their windows 2;
+	// ungrouped sessions stay at 0 with windows at 1
+	isGroup bool   // a user-made folder, not anything the muxes reported
+	isWin   bool   // a window row (vs a session or group row)
+	group   string // name of the group holding this row, "" = ungrouped
+	count   int    // group rows: how many sessions are inside
+
 	label     string
 	sess      string
 	window    string // window index (depth-1 rows and flat session rows)
@@ -41,14 +47,6 @@ var agentCmds = map[string]bool{
 
 // isAgentCmd reports whether a foreground command is a recognized agent.
 func isAgentCmd(cmd string) bool { return agentCmds[cmd] }
-
-// viewState is what the viewport is currently showing, used to compute inView
-// marks and to suppress the done mark on a session the user is watching.
-type viewState struct {
-	lockSess    string
-	lockWin     string // "" = whole session (its active window)
-	lockBackend string // "" = tmux
-}
 
 // gutter returns up to two attention glyphs, highest priority first:
 // ● bell > ✓ done > ~ activity > ▸ in-viewport.
@@ -119,7 +117,7 @@ func (r railRow) marks() string {
 }
 
 // railRows is the live-tmux entry point: fetch the fleet and build the tree.
-func railRows(hub string, v viewState) []railRow {
+func railRows(hub string, v ViewState) []railRow {
 	return buildRows(hub, v, tmux.Sessions(), tmux.Windows())
 }
 
@@ -127,7 +125,7 @@ func railRows(hub string, v viewState) []railRow {
 // hub session the rail itself lives in (rendering the hub inside its own
 // viewport would be an infinite mirror). Session rows aggregate the single
 // highest-priority mark across their windows (mockup screen 2).
-func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.Window) []railRow {
+func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.Window) []railRow {
 	var rows []railRow
 	for _, s := range sessions {
 		if s.Name == hub || strings.HasPrefix(s.Name, gmViewPrefix) {
@@ -136,7 +134,7 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 		// "Attached" means attached ELSEWHERE: the viewport's own nested
 		// client doesn't count, or every viewed session would show ●.
 		attached := s.Clients > 0
-		if s.Name == v.lockSess {
+		if s.Name == v.Sess {
 			attached = s.Clients > 1
 		}
 		sessRow := railRow{depth: 0, label: s.Name, sess: s.Name, attached: attached}
@@ -170,7 +168,7 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 		for _, w := range sessWins {
 			inView := isViewed(v, w.Session, w.Index, w.Active)
 			row := railRow{
-				depth: 1, label: w.Index + ":" + w.Name,
+				depth: 1, isWin: true, label: w.Index + ":" + w.Name,
 				sess: s.Name, window: w.Index, active: w.Active,
 				bell: w.Bell, done: w.Done, act: w.Activity, inView: inView,
 			}
@@ -205,9 +203,21 @@ func visibleRows(rows []railRow, collapsed map[string]bool) []railRow {
 		return rows
 	}
 	out := make([]railRow, 0, len(rows))
-	hideSess := ""
+	hideSess, hideGroup := "", ""
 	for _, r := range rows {
-		if r.depth == 0 {
+		if r.isGroup {
+			hideSess, hideGroup = "", ""
+			r.collapsed = collapsed[groupKey(r.label)]
+			if r.collapsed {
+				hideGroup = r.label
+			}
+			out = append(out, r)
+			continue
+		}
+		if r.group != "" && r.group == hideGroup {
+			continue // folded group: sessions and windows alike
+		}
+		if !r.isWin {
 			hideSess = ""
 			if !r.flat { // flat rows have no children and no disclosure state
 				r.collapsed = collapsed[r.sess]
@@ -259,11 +269,11 @@ func suppressViewedMarks(r *railRow) {
 // isViewed reports whether the viewport is showing this window: either it is
 // the explicitly locked window, or the whole session is locked and this is its
 // active window.
-func isViewed(v viewState, sess, window string, active bool) bool {
-	if v.lockBackend != "" || v.lockSess != sess {
+func isViewed(v ViewState, sess, window string, active bool) bool {
+	if v.Backend != "" || v.Sess != sess {
 		return false // aux-backend locks never mark tmux rows
 	}
-	return v.lockWin == window || (v.lockWin == "" && active)
+	return v.Win == window || (v.Win == "" && active)
 }
 
 // paneKey identifies a single pane for command-transition tracking.
