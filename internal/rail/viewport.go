@@ -21,12 +21,13 @@ const gmViewPrefix = "gm-view-"
 // viewport is the right-hand pane of the hub: a live nested tmux client the
 // rail re-points without ever moving itself.
 type viewport struct {
-	pane     string // %id of the pane
-	idleCmd  string // command that renders the idle placeholder
-	lockSess string // session currently rendered, "" = idle
-	lockWin  string // window index within lockSess
-	detached bool   // user pressed d — heal re-idles instead of re-pointing
-	grouped  bool   // attached via a gm-view-* grouped session
+	pane        string // %id of the pane
+	idleCmd     string // command that renders the idle placeholder
+	lockSess    string // session currently rendered, "" = idle
+	lockWin     string // window index within lockSess
+	lockBackend string // "" = tmux; e.g. "zellij"
+	detached    bool   // user pressed d — heal re-idles instead of re-pointing
+	grouped     bool   // attached via a gm-view-* grouped session (tmux only)
 }
 
 // attachTarget is the session name the viewport's client is actually attached
@@ -64,9 +65,29 @@ func (v *viewport) point(sess, window string, grouped bool) {
 	}
 	tmux.Run("respawn-pane", "-k", "-t", v.pane, attach)
 	v.lockSess, v.lockWin, v.detached, v.grouped = sess, window, false, grouped
+	v.lockBackend = ""
 	if window != "" {
 		tmux.SetDone(sess, window, false)
 	}
+}
+
+// pointAux respawns the viewport onto a non-tmux backend's session. The
+// attach command is per-backend; no grouped machinery — backends without
+// session groups simply attach directly.
+func (v *viewport) pointAux(backend, sess string) {
+	if v.pane == "" || sess == "" {
+		return
+	}
+	var attach string
+	switch backend {
+	case "zellij":
+		attach = fmt.Sprintf("zellij attach '%s'", sess)
+	default:
+		return
+	}
+	tmux.Run("respawn-pane", "-k", "-t", v.pane, attach)
+	v.lockSess, v.lockWin, v.lockBackend = sess, "", backend
+	v.detached, v.grouped = false, false
 }
 
 // idle respawns the viewport onto the ghostmux idle placeholder and drops any
@@ -76,7 +97,7 @@ func (v *viewport) idle() {
 		return
 	}
 	tmux.Run("respawn-pane", "-k", "-t", v.pane, v.idleCmd)
-	v.lockSess, v.lockWin = "", ""
+	v.lockSess, v.lockWin, v.lockBackend = "", "", ""
 }
 
 // heal runs on every data tick: if the pane died, re-point it onto its lock,
@@ -88,6 +109,8 @@ func (v *viewport) heal() bool {
 	}
 	if v.detached || v.lockSess == "" {
 		v.idle()
+	} else if v.lockBackend != "" {
+		v.pointAux(v.lockBackend, v.lockSess)
 	} else {
 		v.point(v.lockSess, v.lockWin, v.grouped)
 	}

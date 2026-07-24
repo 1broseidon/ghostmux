@@ -71,11 +71,11 @@ Any terminal.
 
 ## Roadmap
 
-- **Multi-backend**: one rail for every multiplexer on the box — zellij
-  first (session-level: list/attach/create/kill, honestly degraded gutter),
-  screen later. Backends earn features by proving data, never by faked
-  parity. The `Backend` interface extraction from `internal/tmux` is the
-  first step.
+- **Multi-backend** (v0.2 prototype shipped): zellij sessions appear in
+  the rail beside tmux — honestly degraded to what zellij proves (name +
+  EXITED state; no attached dot, no tree, no marks), viewable in the
+  viewport and killable with `x`. Next: create-flow routing, the formal
+  `Backend` interface, zellij state-export plugin for tree depth, screen.
 - Go tmux control-mode (`-CC`) client library; event refresh migrates off
   hooks/wait-for.
 - Deeper evidence for the gutter (output sampling, OSC 133 / terminal

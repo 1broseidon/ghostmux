@@ -44,6 +44,7 @@ type railModel struct {
 	mode        mode
 	filterQuery string          // active filter substring (Task 8)
 	killTarget  string          // session pending `x` confirmation (Task 9)
+	killBackend string          // backend of killTarget ("" = tmux)
 	input       textinput.Model // shared prompt editor for `/` and `n` modes
 
 	errMsg   string    // last action error, shown on the hint line
@@ -152,9 +153,7 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.maybeBlink()
 	case "enter":
 		if vis := m.visible(); m.cursor < len(vis) {
-			r := vis[m.cursor]
-			m.clearViewedDone(r)
-			m.vp.point(r.sess, r.window, r.attached)
+			m.pointRow(vis[m.cursor])
 		}
 		m.refresh()
 	case "tab":
@@ -182,6 +181,7 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if vis := m.visible(); m.cursor < len(vis) {
 			m.mode = modeKillConfirm
 			m.killTarget = vis[m.cursor].sess
+			m.killBackend = vis[m.cursor].backend
 			m.errMsg = ""
 		}
 	case "/":
@@ -256,10 +256,10 @@ func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m railModel) updateKillConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
-		target := m.killTarget
+		target, backend := m.killTarget, m.killBackend
 		m.mode = modeNormal
-		m.killTarget = ""
-		if err := m.killSession(target); err != nil {
+		m.killTarget, m.killBackend = "", ""
+		if err := m.killSession(target, backend); err != nil {
 			m.flashError(err)
 		}
 	case "n", "esc":
@@ -292,9 +292,7 @@ func (m railModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if idx == m.cursor {
 			if vis := m.visible(); idx < len(vis) {
-				r := vis[idx]
-				m.clearViewedDone(r)
-				m.vp.point(r.sess, r.window, r.attached)
+				m.pointRow(vis[idx])
 				m.refresh()
 			}
 			return m, nil
@@ -391,7 +389,17 @@ func (m *railModel) createSession(name string) error {
 
 // killSession kills a session by name; if it held the viewport lock, the
 // viewport goes idle (Task 9, `x` key).
-func (m *railModel) killSession(name string) error {
+func (m *railModel) killSession(name, backend string) error {
+	if backend != "" {
+		if err := killAux(backend, name); err != nil {
+			return err
+		}
+		if m.vp.lockBackend == backend && m.vp.lockSess == name {
+			m.vp.idle()
+		}
+		m.refresh()
+		return nil
+	}
 	if err := tmux.Run("kill-session", "-t", "="+name); err != nil {
 		return err
 	}
@@ -421,7 +429,8 @@ func (m *railModel) refresh() {
 	// session changes its active window — the lock tracks it so ▸, heal,
 	// and the cursor all point at what the viewport actually shows. When
 	// grouped, the shadow session carries the viewport's own focus.
-	if m.vp.lockSess != "" {
+	// Aux backends have no observable window focus; nothing to sync.
+	if m.vp.lockSess != "" && m.vp.lockBackend == "" {
 		target := m.vp.attachTarget()
 		for _, w := range windows {
 			if w.Session == target && w.Active {
@@ -431,6 +440,7 @@ func (m *railModel) refresh() {
 		}
 	}
 	m.rows = buildRows(m.hub, m.viewState(), sessions, windows)
+	m.rows = append(m.rows, auxRows(auxSessions(), m.viewState())...)
 	m.followViewport()
 }
 
@@ -469,7 +479,17 @@ func (m *railModel) followViewport() {
 // viewState is the viewport's current lock, used for inView marks and done
 // suppression.
 func (m railModel) viewState() viewState {
-	return viewState{lockSess: m.vp.lockSess, lockWin: m.vp.lockWin}
+	return viewState{lockSess: m.vp.lockSess, lockWin: m.vp.lockWin, lockBackend: m.vp.lockBackend}
+}
+
+// pointRow routes a row selection to the right backend's viewport attach.
+func (m *railModel) pointRow(r railRow) {
+	if r.backend != "" {
+		m.vp.pointAux(r.backend, r.sess)
+		return
+	}
+	m.clearViewedDone(r)
+	m.vp.point(r.sess, r.window, r.attached)
 }
 
 // suppressDone reports whether a window's done mark should be withheld because

@@ -101,7 +101,9 @@ func cmdOnce(args []string) error {
 			marks = true
 		}
 	}
-	for _, r := range railRows("", viewState{}) {
+	rows := railRows("", viewState{})
+	rows = append(rows, auxRows(auxSessions(), viewState{})...)
+	for _, r := range rows {
 		switch {
 		case marks:
 			fmt.Println(r.marks())

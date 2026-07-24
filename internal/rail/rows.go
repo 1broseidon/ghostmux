@@ -24,6 +24,7 @@ type railRow struct {
 	collapsed bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
 	flat      bool   // single-window session rendered as one row, no children
 	cmd       string // flat rows: the window's foreground command, shown dim
+	backend   string // "" = tmux; e.g. "zellij" for other multiplexers
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -44,8 +45,9 @@ func isAgentCmd(cmd string) bool { return agentCmds[cmd] }
 // viewState is what the viewport is currently showing, used to compute inView
 // marks and to suppress the done mark on a session the user is watching.
 type viewState struct {
-	lockSess string
-	lockWin  string // "" = whole session (its active window)
+	lockSess    string
+	lockWin     string // "" = whole session (its active window)
+	lockBackend string // "" = tmux
 }
 
 // gutter returns up to two attention glyphs, highest priority first:
@@ -92,6 +94,10 @@ func (r railRow) plainFiltered(query string) string {
 // "SESS|WIN|bell,done,act,view" — WIN is empty for session rows, and the
 // flags list only the marks that are set (empty string if none).
 func (r railRow) marks() string {
+	sess := r.sess
+	if r.backend != "" {
+		sess = r.backend + ":" + r.sess // backend-qualified row identity
+	}
 	win := ""
 	if r.depth == 1 || r.flat {
 		win = r.window
@@ -109,7 +115,7 @@ func (r railRow) marks() string {
 	if r.inView {
 		flags = append(flags, "view")
 	}
-	return fmt.Sprintf("%s|%s|%s", r.sess, win, strings.Join(flags, ","))
+	return fmt.Sprintf("%s|%s|%s", sess, win, strings.Join(flags, ","))
 }
 
 // railRows is the live-tmux entry point: fetch the fleet and build the tree.
@@ -254,8 +260,8 @@ func suppressViewedMarks(r *railRow) {
 // the explicitly locked window, or the whole session is locked and this is its
 // active window.
 func isViewed(v viewState, sess, window string, active bool) bool {
-	if v.lockSess != sess {
-		return false
+	if v.lockBackend != "" || v.lockSess != sess {
+		return false // aux-backend locks never mark tmux rows
 	}
 	return v.lockWin == window || (v.lockWin == "" && active)
 }

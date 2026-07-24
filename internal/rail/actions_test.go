@@ -179,7 +179,7 @@ func TestKillSessionIdlesViewportIfLocked(t *testing.T) {
 	t.Cleanup(func() { tmux.Runner = orig })
 
 	m := &railModel{vp: viewport{pane: "%1", idleCmd: "ghostmux rail idle", lockSess: "alpha"}}
-	if err := m.killSession("alpha"); err != nil {
+	if err := m.killSession("alpha", ""); err != nil {
 		t.Fatalf("killSession: %v", err)
 	}
 	if m.vp.lockSess != "" {
@@ -202,7 +202,7 @@ func TestKillSessionLeavesUnrelatedViewportAlone(t *testing.T) {
 	t.Cleanup(func() { tmux.Runner = orig })
 
 	m := &railModel{vp: viewport{pane: "%1", idleCmd: "x", lockSess: "other"}}
-	if err := m.killSession("alpha"); err != nil {
+	if err := m.killSession("alpha", ""); err != nil {
 		t.Fatalf("killSession: %v", err)
 	}
 	if m.vp.lockSess != "other" {
@@ -224,5 +224,31 @@ func TestMoveCursorSkipsDimmedRows(t *testing.T) {
 	m.moveCursor(1) // should skip dotfiles (row 1), land on gm-agent-01 (row 2)
 	if m.cursor != 2 {
 		t.Errorf("moveCursor(1) landed on %d, want 2 (skipping dimmed row 1)", m.cursor)
+	}
+}
+
+// TestAuxSessionsParseZellij: zellij rows come only from provable list
+// output — EXITED and prose lines are skipped, marks stay empty.
+func TestAuxSessionsParseZellij(t *testing.T) {
+	origList, origPresent := zellijList, zellijPresent
+	zellijPresent = true
+	zellijList = func() (string, error) {
+		return "alpha [Created 2h ago]\nbeta [Created 1m ago] (EXITED - attach to resurrect)\ngamma [Created 5s ago]\n", nil
+	}
+	t.Cleanup(func() { zellijList, zellijPresent = origList, origPresent })
+
+	aux := auxSessions()
+	if len(aux) != 2 || aux[0].name != "alpha" || aux[1].name != "gamma" {
+		t.Fatalf("auxSessions = %+v, want alpha+gamma only", aux)
+	}
+	rows := auxRows(aux, viewState{lockBackend: "zellij", lockSess: "gamma"})
+	if !rows[1].inView || rows[0].inView {
+		t.Errorf("inView marks wrong: %+v", rows)
+	}
+	if rows[0].bell || rows[0].act || rows[0].done || rows[0].attached {
+		t.Errorf("zellij rows must carry no unproven marks: %+v", rows[0])
+	}
+	if rows[0].cmd != "zellij" || !rows[0].flat {
+		t.Errorf("zellij row rendering fields wrong: %+v", rows[0])
 	}
 }
