@@ -304,6 +304,7 @@ func buildHub(exe string) error {
 	// focuses them without needing prefix navigation, regardless of the
 	// user's own tmux mouse setting (which stays untouched everywhere else).
 	tmux.Run("set-option", "-t", "hub", "mouse", "on")
+	ensureToggleBind()
 	hubChrome()
 
 	panes := tmux.Lines("list-panes", "-t", "=hub", "-F", "#{pane_id}")
@@ -320,6 +321,29 @@ func buildHub(exe string) error {
 	tmux.Run("set-option", "-p", "-t", vp, "remain-on-exit", "on")
 	tmux.Run("respawn-pane", "-k", "-t", vp, exe+" rail idle")
 	return nil
+}
+
+// ensureToggleBind makes the hub keyboard-complete on any box with exactly
+// ONE global key: prefix None removes every prefix command, so without it
+// there is no keyboard way back from the viewport to the rail. Rules, in
+// order: never steal keys from apps (outside the hub the bind forwards the
+// key untouched); respect existing bindings (user's or a plugin's — we bind
+// nothing if the key is taken); configurable without a config file (set
+// @ghostmux_toggle in tmux.conf). Default C-\ — unclaimed by common TUIs,
+// and vim-tmux-navigator muscle memory for "previous pane".
+func ensureToggleBind() {
+	key := strings.TrimSpace(tmux.Output("show-options", "-gv", "@ghostmux_toggle"))
+	if key == "" {
+		key = `C-\`
+	}
+	// Query the specific key: a table dump would false-positive on chords
+	// inside tmux's default mouse-menu definitions.
+	if _, err := tmux.Runner("list-keys", "-T", "root", key); err == nil {
+		return // already bound by the user or a plugin: theirs wins
+	}
+	tmux.Run("bind-key", "-n", key,
+		"if-shell", "-F", "#{==:#{session_name},hub}",
+		"select-pane -t :.+", "send-keys "+key)
 }
 
 // hubChrome themes the hub session per docs/DESIGN.md §1/§4 — thin muted pane

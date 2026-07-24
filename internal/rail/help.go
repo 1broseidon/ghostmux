@@ -17,6 +17,8 @@ var keyHelpTable = []keyHelp{
 	{"j/k, ↓/↑", "move cursor"},
 	{"g/G", "first / last row"},
 	{"↵", "view in pane →"},
+	{"l/→", "focus viewport"},
+	{"ctrl+\\", "toggle rail ⇄ viewport"},
 	{"tab", "collapse / expand session"},
 	{"n", "new session"},
 	{"x", "kill selected (y/n confirm)"},

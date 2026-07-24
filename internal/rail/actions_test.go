@@ -14,7 +14,7 @@ import (
 func TestKeyHelpCoversBoundKeys(t *testing.T) {
 	// boundKeys mirrors updateNormalKey's switch cases exactly; keep the two
 	// lists in sync when the keymap changes.
-	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?"}
+	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?", "l", "right"}
 
 	var haystack strings.Builder
 	for _, k := range keyHelpTable {
@@ -27,6 +27,7 @@ func TestKeyHelpCoversBoundKeys(t *testing.T) {
 		"down":  "↓",
 		"up":    "↑",
 		"enter": "↵",
+		"right": "→",
 	}
 
 	for _, key := range boundKeys {

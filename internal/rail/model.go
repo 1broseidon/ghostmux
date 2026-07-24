@@ -163,6 +163,12 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.collapsed[sess] = !m.collapsed[sess]
 			m.clamp()
 		}
+	case "l", "right":
+		// Focus the viewport — the rail's own affordance, independent of
+		// any root-table ctrl+h/l nav bindings.
+		if m.vp.pane != "" {
+			tmux.Run("select-pane", "-t", m.vp.pane)
+		}
 	case "d":
 		m.vp.idle()
 		m.vp.detached = true
