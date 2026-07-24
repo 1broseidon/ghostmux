@@ -1,21 +1,13 @@
-// ghostmux: the coordination layer for the ghostty/tmux boundary.
+// ghostmux: attach-anywhere mission control for your multiplexers.
 //
-// The problem: ghostty and tmux each stop dead at the other's boundary. tmux
-// can't reach up (spawn terminal windows, yield keys, see splits); ghostty
-// can't reach down (sessions, persistence, remote). Every feature here must
-// span that boundary — anything tmux or ghostty could do alone is out of
-// scope, demoted to a convenience at best.
+// The hub is itself a tmux session: a persistent rail (session tree + live
+// attention gutter) beside a viewport that renders whatever you select as a
+// nested client. Attach it from any terminal on any machine — ghostty,
+// iTerm2, an ssh box — and your cockpit is identical, because the whole
+// control surface lives in the multiplexer, never in the terminal.
 //
-// Boundary commands:
-//   - install/uninstall: matched-pair config for both sides of the seam
-//     (one nav keymap across ghostty splits, tmux panes, vim windows)
-//   - restore: reopen a ghostty window for every orphaned tmux session
-//   - up -w:   ghostty window attached to a named session (create on demand)
-//   - hub:     the rail+viewport coordination surface for a fleet of sessions
-//   - doctor:  diagnose the seam (terminfo, wiring, versions)
-//
-// Conveniences (fail the purist test, cost nothing):
-//   - up (in place), ls
+// Law of the rail: render evidence, never inference. Scope law: ship only
+// what the multiplexer alone can't give you.
 package main
 
 import (
@@ -27,32 +19,24 @@ import (
 )
 
 func main() {
+	// Bare `ghostmux` IS the product: log in, type it, you're in the hub.
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		exit(wiring.CmdHub(nil))
 	}
 	var err error
 	switch os.Args[1] {
-	case "install":
-		err = wiring.CmdInstall()
-	case "uninstall":
-		err = wiring.CmdUninstall()
-	case "up":
-		err = wiring.CmdUp(os.Args[2:])
-	case "restore":
-		err = wiring.CmdRestore()
-	case "rail":
-		err = rail.CmdRail(os.Args[2:])
 	case "hub":
 		err = wiring.CmdHub(os.Args[2:])
-	case "shell":
-		err = wiring.CmdShell()
-	case "ambient":
-		err = wiring.CmdAmbient(os.Args[2:])
+	case "up":
+		err = wiring.CmdUp(os.Args[2:])
 	case "ls":
 		err = wiring.CmdLs()
 	case "doctor":
 		err = wiring.CmdDoctor()
+	case "rail":
+		err = rail.CmdRail(os.Args[2:])
+	case "ghostty":
+		err = wiring.CmdGhostty(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -60,46 +44,36 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	exit(err)
+}
+
+func exit(err error) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ghostmux:", err)
 		os.Exit(1)
 	}
+	os.Exit(0)
 }
 
 func usage() {
-	fmt.Print(`ghostmux — the coordination layer for the ghostty/tmux boundary
+	fmt.Print(`ghostmux — attach-anywhere mission control for your multiplexers
 
-Your terminal and your multiplexer each stop dead at the other's boundary;
-your workflow doesn't. Everything here spans that boundary.
+Type ghostmux. You're in the hub: a persistent rail of every session with a
+live attention gutter, beside a viewport that renders whatever you select.
+The hub is itself a tmux session — ssh in from anywhere, same cockpit.
 
-ghostmux hub is the entry point: run it and stay there. It creates (or
-attaches to) the dedicated hub session — a persistent rail pane (session/
-window tree, live attention gutter) beside a viewport pane that jumps to
-whatever you select.
+usage:
+  ghostmux                  open the hub (create or attach)
+  ghostmux up <name> [dir]  attach a named session in place (create on demand)
+  ghostmux ls               list sessions
+  ghostmux doctor           diagnose the environment
+  ghostmux rail ...         rail internals (once/idle/help) — used by the hub
 
-boundary:
-  ghostmux hub              persistent rail+viewport hub — start here
-  ghostmux ambient on|off   every ghostty surface becomes a
-                            persistent tmux session; reopening ghostty
-                            unfolds your whole workspace, zero typing
-  ghostmux install          matched-pair nav config: one keymap across
-                            ghostty splits, tmux panes, and vim windows
-  ghostmux uninstall        remove the wiring (snippets stay in ~/.config/ghostmux)
-  ghostmux restore          reopen a ghostty window for every orphaned
-                            (unattached) tmux session
-  ghostmux up -w <name>     ghostty window attached to session <name>,
-                            created on demand
-  ghostmux doctor           diagnose the seam: terminfo, wiring, hub layout
-  ghostmux shell            what ambient mode runs per surface (internal)
+ghostty extras (optional, one terminal's integration):
+  ghostmux ghostty install    wire the unified ctrl+h/j/k/l nav keymap
+                              (ghostty splits -> tmux panes -> vim windows)
+  ghostmux ghostty uninstall  remove the wiring
 
-convenience:
-  ghostmux up <name> [dir]  attach in place (switches client inside tmux)
-  ghostmux ls               list tmux sessions
-
-internals (used by the hub; not for direct use):
-  ghostmux rail              run the rail TUI in the current pane
-  ghostmux rail once         print one frame and exit (debugging / agents)
-  ghostmux rail idle         render the viewport idle placeholder
-  ghostmux rail help         print the keymap (used by the ? popup)
+Keys inside the hub: press ? for the keymap.
 `)
 }
