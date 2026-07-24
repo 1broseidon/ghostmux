@@ -67,7 +67,7 @@ func (m railModel) View() string {
 	if len(vis) == 0 {
 		b.WriteString(emptyStateBody(treeHeight))
 	} else {
-		b.WriteString(treeBody(vis, m.cursor, m.blinkPhase, m.spinPhase, m.filterQuery, treeHeight))
+		b.WriteString(treeBody(vis, m.cursor, m.blinkPhase, m.filterQuery, treeHeight))
 	}
 	b.WriteString("\n")
 	b.WriteString(m.hintLine())
@@ -166,7 +166,7 @@ func newKeyHint(key, desc string) string {
 const railMarksWidth = 3
 
 // treeBody renders the scrollable session/window tree, rows 3..height-2.
-func treeBody(vis []railRow, cursor, blinkPhase, spinPhase int, filterQuery string, height int) string {
+func treeBody(vis []railRow, cursor, blinkPhase int, filterQuery string, height int) string {
 	start, end, moreUp, moreDown := scrollWindow(len(vis), height, cursor)
 	var b strings.Builder
 	printed := 0
@@ -175,7 +175,7 @@ func treeBody(vis []railRow, cursor, blinkPhase, spinPhase int, filterQuery stri
 		printed++
 	}
 	for i := start; i < end; i++ {
-		b.WriteString(renderRow(vis[i], i == cursor, blinkPhase, spinPhase, filterQuery) + "\n")
+		b.WriteString(renderRow(vis[i], i == cursor, blinkPhase, filterQuery) + "\n")
 		printed++
 	}
 	if moreDown > 0 {
@@ -215,10 +215,7 @@ func itoa(n int) string {
 // indent/arrow prefix, a truncated label, and up to two right-aligned gutter
 // marks (never truncated). Filter-dimmed rows render entirely in #504945
 // (marks too), in place — no reflow.
-// spinFrames is the braille spinner for rows with a live foreground command.
-var spinFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-
-func renderRow(r railRow, cursor bool, blinkPhase, spinPhase int, filterQuery string) string {
+func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) string {
 	dim := filterQuery != "" && !matchesFilter(r, filterQuery)
 
 	indent := "     " // window rows: 5-col indent
@@ -251,16 +248,13 @@ func renderRow(r railRow, cursor bool, blinkPhase, spinPhase int, filterQuery st
 	name := truncateLabel(r.label, nameWidth)
 
 	// Flat rows show the window's foreground command dim after the name,
-	// truncated into whatever space the name and suffix leave over. A live
-	// (non-shell) command replaces the · separator with a braille spinner.
-	cmdStr, cmdSep := "", ""
+	// truncated into whatever space the name and suffix leave over. No
+	// liveness animation: pane_current_command can't distinguish a working
+	// process from an idle one, and implying activity would mislead.
+	cmdStr := ""
 	if r.flat && r.cmd != "" {
 		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
-		if rest >= 5 { // " X " + at least 2 chars of command
-			cmdSep = "·"
-			if !shellCmds[r.cmd] {
-				cmdSep = string(spinFrames[spinPhase%len(spinFrames)])
-			}
+		if rest >= 5 { // " · " + at least 2 chars of command
 			cmdStr = truncateLabel(r.cmd, rest-3)
 		}
 	}
@@ -270,7 +264,7 @@ func renderRow(r railRow, cursor bool, blinkPhase, spinPhase int, filterQuery st
 	// measured on the RAW strings — styling happens after.
 	cmdRaw := ""
 	if cmdStr != "" {
-		cmdRaw = " " + cmdSep + " " + cmdStr
+		cmdRaw = " · " + cmdStr
 	}
 	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw))
 	pad := strings.Repeat(" ", max0(labelWidth-used))
@@ -297,13 +291,7 @@ func renderRow(r railRow, cursor bool, blinkPhase, spinPhase int, filterQuery st
 	}
 	cmdStyled := ""
 	if cmdStr != "" {
-		sepFg := hexTitleTail
-		if cmdSep != "·" { // spinner: live command, accent orange
-			sepFg = hexTitleAccent
-		}
-		cmdStyled = rowStyle(hexSessionName, false, cursor).Render(" ") +
-			rowStyle(dimFg(sepFg), false, cursor).Render(cmdSep) +
-			rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" "+cmdStr)
+		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" · " + cmdStr)
 	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
 

@@ -16,7 +16,6 @@ import (
 
 type railTick time.Time
 type blinkMsg time.Time
-type spinMsg time.Time
 
 // mode selects which keymap Update() dispatches to and what the hint line
 // shows (Tasks 8-9).
@@ -40,8 +39,6 @@ type railModel struct {
 	attached     map[string]bool // session name → attached elsewhere
 	blinking     bool            // 400ms blink timer running (D7)
 	blinkPhase   int             // bell blink phase, mod 3 (glyph hidden on phase 2)
-	spinning     bool            // 120ms spinner timer running (rows with a live command)
-	spinPhase    int             // braille spinner frame counter
 
 	collapsed map[string]bool // session name → collapsed in the rail (Task 7)
 
@@ -80,13 +77,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewportDead = m.vp.heal()
 		m.clamp()
 		debugRefresh("tick")
-		return m, tea.Batch(railTicker(), m.maybeBlink(), m.maybeSpin())
+		return m, tea.Batch(railTicker(), m.maybeBlink())
 	case refreshMsg:
 		m.refresh()
 		m.viewportDead = m.vp.heal()
 		m.clamp()
 		debugRefresh("event")
-		return m, tea.Batch(m.maybeBlink(), m.maybeSpin())
+		return m, m.maybeBlink()
 	case blinkMsg:
 		if !anyBell(m.rows) {
 			m.blinking = false // bells cleared: stop the timer
@@ -94,13 +91,6 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.blinkPhase = (m.blinkPhase + 1) % 3
 		return m, blinkTicker()
-	case spinMsg:
-		if !anyRunning(m.rows) {
-			m.spinning = false // nothing running: stop the timer
-			return m, nil
-		}
-		m.spinPhase++
-		return m, spinTicker()
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		// Self-enforce the rail width: hub creation resizes while detached,
@@ -536,33 +526,6 @@ func (m *railModel) maybeBlink() tea.Cmd {
 func anyBell(rows []railRow) bool {
 	for _, r := range rows {
 		if r.bell {
-			return true
-		}
-	}
-	return false
-}
-
-// spinTicker drives the braille spinner on rows with a live foreground
-// command; like the blink timer, it runs only while there is one.
-func spinTicker() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg { return spinMsg(t) })
-}
-
-// maybeSpin starts the spinner timer if a running command exists and no
-// timer is running.
-func (m *railModel) maybeSpin() tea.Cmd {
-	if !m.spinning && anyRunning(m.rows) {
-		m.spinning = true
-		return spinTicker()
-	}
-	return nil
-}
-
-// anyRunning reports whether any flat row's foreground command is live
-// (non-shell) — what the spinner animates.
-func anyRunning(rows []railRow) bool {
-	for _, r := range rows {
-		if r.flat && r.cmd != "" && !shellCmds[r.cmd] {
 			return true
 		}
 	}
