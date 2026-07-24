@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
 	"github.com/1broseidon/ghostmux/internal/wiring"
@@ -14,6 +16,7 @@ import (
 
 type railTick time.Time
 type blinkMsg time.Time
+type spinMsg time.Time
 
 // mode selects which keymap Update() dispatches to and what the hint line
 // shows (Tasks 8-9).
@@ -37,13 +40,15 @@ type railModel struct {
 	attached     map[string]bool // session name → attached elsewhere
 	blinking     bool            // 400ms blink timer running (D7)
 	blinkPhase   int             // bell blink phase, mod 3 (glyph hidden on phase 2)
+	spinning     bool            // 120ms spinner timer running (rows with a live command)
+	spinPhase    int             // braille spinner frame counter
 
 	collapsed map[string]bool // session name → collapsed in the rail (Task 7)
 
 	mode        mode
-	filterQuery string // active filter substring (Task 8)
-	createInput string // in-progress `n` prompt text (Task 9)
-	killTarget  string // session pending `x` confirmation (Task 9)
+	filterQuery string          // active filter substring (Task 8)
+	killTarget  string          // session pending `x` confirmation (Task 9)
+	input       textinput.Model // shared prompt editor for `/` and `n` modes
 
 	errMsg   string    // last action error, shown on the hint line
 	errUntil time.Time // errMsg clears once time.Now() passes this
@@ -75,13 +80,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewportDead = m.vp.heal()
 		m.clamp()
 		debugRefresh("tick")
-		return m, tea.Batch(railTicker(), m.maybeBlink())
+		return m, tea.Batch(railTicker(), m.maybeBlink(), m.maybeSpin())
 	case refreshMsg:
 		m.refresh()
 		m.viewportDead = m.vp.heal()
 		m.clamp()
 		debugRefresh("event")
-		return m, m.maybeBlink()
+		return m, tea.Batch(m.maybeBlink(), m.maybeSpin())
 	case blinkMsg:
 		if !anyBell(m.rows) {
 			m.blinking = false // bells cleared: stop the timer
@@ -89,6 +94,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.blinkPhase = (m.blinkPhase + 1) % 3
 		return m, blinkTicker()
+	case spinMsg:
+		if !anyRunning(m.rows) {
+			m.spinning = false // nothing running: stop the timer
+			return m, nil
+		}
+		m.spinPhase++
+		return m, spinTicker()
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		// Self-enforce the rail width: hub creation resizes while detached,
@@ -168,8 +180,9 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refresh()
 	case "n":
 		m.mode = modeCreate
-		m.createInput = ""
+		m.input = newPromptInput()
 		m.errMsg = ""
+		return m, textinput.Blink
 	case "a":
 		if err := m.agentSession(); err != nil {
 			m.flashError(err)
@@ -182,7 +195,10 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "/":
 		m.mode = modeFilter
+		m.input = newPromptInput()
+		m.input.SetValue(m.filterQuery)
 		m.errMsg = ""
+		return m, textinput.Blink
 	case "esc":
 		if m.filterQuery != "" {
 			m.filterQuery = ""
@@ -194,6 +210,19 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// newPromptInput builds the shared hint-line editor for `/` and `n` modes —
+// a real bubbles textinput: arrow keys, ctrl+a/e, word-wise editing, paste.
+func newPromptInput() textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.CharLimit = 48
+	ti.Width = railWidth - 6
+	ti.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(hexSessionName))
+	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(hexSessionName))
+	ti.Focus()
+	return ti
+}
+
 // updateFilterKey handles keys while typing a filter query (`/`, Task 8).
 func (m railModel) updateFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -201,20 +230,16 @@ func (m railModel) updateFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterQuery = ""
 		m.mode = modeNormal
 		m.clamp()
+		return m, nil
 	case "enter":
 		m.mode = modeNormal // keeps the filter active; second esc clears it
 		m.clamp()
-	case "backspace":
-		if n := len([]rune(m.filterQuery)); n > 0 {
-			r := []rune(m.filterQuery)
-			m.filterQuery = string(r[:n-1])
-		}
-	default:
-		if msg.Type == tea.KeyRunes {
-			m.filterQuery += string(msg.Runes)
-		}
+		return m, nil
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.filterQuery = m.input.Value() // live: dimming follows every keystroke
+	return m, cmd
 }
 
 // updateCreateKey handles keys while typing a new-session name (`n`, Task 9).
@@ -222,25 +247,18 @@ func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = modeNormal
-		m.createInput = ""
+		return m, nil
 	case "enter":
-		name := m.createInput
+		name := m.input.Value()
 		m.mode = modeNormal
-		m.createInput = ""
 		if err := m.createSession(name); err != nil {
 			m.flashError(err)
 		}
-	case "backspace":
-		if n := len([]rune(m.createInput)); n > 0 {
-			r := []rune(m.createInput)
-			m.createInput = string(r[:n-1])
-		}
-	default:
-		if msg.Type == tea.KeyRunes {
-			m.createInput += string(msg.Runes)
-		}
+		return m, nil
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
 // updateKillConfirmKey handles the y/n confirmation after `x` (Task 9).
@@ -511,6 +529,33 @@ func (m *railModel) maybeBlink() tea.Cmd {
 func anyBell(rows []railRow) bool {
 	for _, r := range rows {
 		if r.bell {
+			return true
+		}
+	}
+	return false
+}
+
+// spinTicker drives the braille spinner on rows with a live foreground
+// command; like the blink timer, it runs only while there is one.
+func spinTicker() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg { return spinMsg(t) })
+}
+
+// maybeSpin starts the spinner timer if a running command exists and no
+// timer is running.
+func (m *railModel) maybeSpin() tea.Cmd {
+	if !m.spinning && anyRunning(m.rows) {
+		m.spinning = true
+		return spinTicker()
+	}
+	return nil
+}
+
+// anyRunning reports whether any flat row's foreground command is live
+// (non-shell) — what the spinner animates.
+func anyRunning(rows []railRow) bool {
+	for _, r := range rows {
+		if r.flat && r.cmd != "" && !shellCmds[r.cmd] {
 			return true
 		}
 	}

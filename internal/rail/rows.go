@@ -116,7 +116,13 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 		if s.Name == hub {
 			continue
 		}
-		sessRow := railRow{depth: 0, label: s.Name, sess: s.Name, attached: s.Attached}
+		// "Attached" means attached ELSEWHERE: the viewport's own nested
+		// client doesn't count, or every viewed session would show ●.
+		attached := s.Clients > 0
+		if s.Name == v.lockSess {
+			attached = s.Clients > 1
+		}
+		sessRow := railRow{depth: 0, label: s.Name, sess: s.Name, attached: attached}
 		var winRows []railRow
 		var aggBell, aggDone, aggAct, aggView bool
 		var sessWins []tmux.Window
@@ -136,7 +142,7 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 			}
 			rows = append(rows, railRow{
 				depth: 0, flat: true, label: s.Name, sess: s.Name,
-				window: w.Index, attached: s.Attached, active: w.Active,
+				window: w.Index, attached: attached, active: w.Active,
 				bell: w.Bell, done: w.Done, act: w.Activity,
 				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
 			})

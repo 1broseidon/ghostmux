@@ -65,8 +65,7 @@ func helpPage(_ int) string {
 	const keyCol = 9
 	descWidth := railWidth - keyCol - 4
 	var b strings.Builder
-	b.WriteString(titleLine() + "\n\n")
-	b.WriteString("  " + styTitleName.Render("keys") + "\n\n")
+	b.WriteString(" " + styTitleAccent.Render("▍") + styTitleName.Render("ghostmux") + styTitleTail.Render(" ▸ keys") + "\n\n")
 	for _, k := range keyHelpTable {
 		key := truncateLabel(k.key, keyCol)
 		b.WriteString(" " + styActivity.Render(fmt.Sprintf("%*s", keyCol, key)) +

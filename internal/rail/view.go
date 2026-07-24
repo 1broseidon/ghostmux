@@ -61,22 +61,56 @@ func (m railModel) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(titleLine() + "\n\n")
+	b.WriteString(m.titleLine() + "\n\n")
 
 	vis := m.visible()
 	if len(vis) == 0 {
 		b.WriteString(emptyStateBody(treeHeight))
 	} else {
-		b.WriteString(treeBody(vis, m.cursor, m.blinkPhase, m.filterQuery, treeHeight))
+		b.WriteString(treeBody(vis, m.cursor, m.blinkPhase, m.spinPhase, m.filterQuery, treeHeight))
 	}
 	b.WriteString("\n")
 	b.WriteString(m.hintLine())
 	return b.String()
 }
 
-// titleLine renders row 1: ▍ ghostmux ▸ rail.
-func titleLine() string {
-	return " " + styTitleAccent.Render("▍") + styTitleName.Render("ghostmux") + styTitleTail.Render(" ▸ rail")
+// titleLine renders row 1: ▍ ghostmux ▸ rail, with an attention summary
+// (●N bells, ✓N done) right-aligned when there is anything to report.
+func (m railModel) titleLine() string {
+	left := " " + styTitleAccent.Render("▍") + styTitleName.Render("ghostmux") + styTitleTail.Render(" ▸ rail")
+	leftWidth := 1 + 1 + len("ghostmux") + len(" ▸ rail")
+
+	var nBell, nDone int
+	for _, r := range m.rows {
+		if r.depth == 0 { // count once per session, aggregates included
+			if r.bell {
+				nBell++
+			}
+			if r.done {
+				nDone++
+			}
+		}
+	}
+	summary, sumWidth := "", 0
+	if nBell > 0 {
+		s := "●" + itoa(nBell)
+		summary += styBell.Render(s)
+		sumWidth += len([]rune(s))
+	}
+	if nDone > 0 {
+		s := "✓" + itoa(nDone)
+		if summary != "" {
+			summary += " "
+			sumWidth++
+		}
+		summary += rowStyle(hexAttached, false, false).Render(s)
+		sumWidth += len([]rune(s))
+	}
+	if summary == "" {
+		return left
+	}
+	pad := max0(railWidth - 1 - leftWidth - sumWidth)
+	return left + strings.Repeat(" ", pad) + summary
 }
 
 // hintLine renders the bottom row, which becomes a live prompt in filter,
@@ -84,9 +118,9 @@ func titleLine() string {
 func (m railModel) hintLine() string {
 	switch m.mode {
 	case modeFilter:
-		return " " + styActivity.Render("/") + rowStyle(hexSessionName, false, false).Render(m.filterQuery) + blockCursor(m.blinkPhase)
+		return " " + styActivity.Render("/") + m.input.View()
 	case modeCreate:
-		return " " + styHint.Render("new session: ") + rowStyle(hexSessionName, false, false).Render(m.createInput) + blockCursor(m.blinkPhase)
+		return " " + styHint.Render("new: ") + m.input.View()
 	case modeKillConfirm:
 		return " " + styHint.Render("kill "+m.killTarget+"? ") + styBell.Render("y") + styHint.Render("/n")
 	}
@@ -96,16 +130,9 @@ func (m railModel) hintLine() string {
 	if m.viewportDead {
 		return " " + styHint.Render("↵ re-point viewport")
 	}
-	return " " + styHint.Render("j/k move · ↵ view · ? help")
-}
-
-// blockCursor is the ▉ input-prompt cursor, blinking with the shared blink
-// phase (hidden on phase 2, matching the bell cadence).
-func blockCursor(phase int) string {
-	if phase == 2 {
-		return " "
-	}
-	return rowStyle(hexSessionName, false, false).Render("▉")
+	key := func(s string) string { return rowStyle(hexActivity, false, false).Render(s) }
+	sep := styHint.Render(" · ")
+	return " " + key("j/k") + styHint.Render(" move") + sep + key("↵") + styHint.Render(" view") + sep + key("?") + styHint.Render(" help")
 }
 
 // emptyStateBody renders the mockup screen-4 rail body when the tree is
@@ -139,7 +166,7 @@ func newKeyHint(key, desc string) string {
 const railMarksWidth = 3
 
 // treeBody renders the scrollable session/window tree, rows 3..height-2.
-func treeBody(vis []railRow, cursor, blinkPhase int, filterQuery string, height int) string {
+func treeBody(vis []railRow, cursor, blinkPhase, spinPhase int, filterQuery string, height int) string {
 	start, end, moreUp, moreDown := scrollWindow(len(vis), height, cursor)
 	var b strings.Builder
 	printed := 0
@@ -148,7 +175,7 @@ func treeBody(vis []railRow, cursor, blinkPhase int, filterQuery string, height 
 		printed++
 	}
 	for i := start; i < end; i++ {
-		b.WriteString(renderRow(vis[i], i == cursor, blinkPhase, filterQuery) + "\n")
+		b.WriteString(renderRow(vis[i], i == cursor, blinkPhase, spinPhase, filterQuery) + "\n")
 		printed++
 	}
 	if moreDown > 0 {
@@ -188,7 +215,10 @@ func itoa(n int) string {
 // indent/arrow prefix, a truncated label, and up to two right-aligned gutter
 // marks (never truncated). Filter-dimmed rows render entirely in #504945
 // (marks too), in place — no reflow.
-func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) string {
+// spinFrames is the braille spinner for rows with a live foreground command.
+var spinFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+func renderRow(r railRow, cursor bool, blinkPhase, spinPhase int, filterQuery string) string {
 	dim := filterQuery != "" && !matchesFilter(r, filterQuery)
 
 	indent := "     " // window rows: 5-col indent
@@ -221,19 +251,28 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	name := truncateLabel(r.label, nameWidth)
 
 	// Flat rows show the window's foreground command dim after the name,
-	// truncated into whatever space the name and suffix leave over.
-	cmdStr := ""
+	// truncated into whatever space the name and suffix leave over. A live
+	// (non-shell) command replaces the · separator with a braille spinner.
+	cmdStr, cmdSep := "", ""
 	if r.flat && r.cmd != "" {
 		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
-		if rest >= 5 { // " · " + at least 2 chars of command
-			cmdStr = " · " + truncateLabel(r.cmd, rest-3)
+		if rest >= 5 { // " X " + at least 2 chars of command
+			cmdSep = "·"
+			if !shellCmds[r.cmd] {
+				cmdSep = string(spinFrames[spinPhase%len(spinFrames)])
+			}
+			cmdStr = truncateLabel(r.cmd, rest-3)
 		}
 	}
 
 	// Everything left of the marks pads to labelWidth so the marks land
 	// flush right at the rail edge, every row, every time. Widths are
 	// measured on the RAW strings — styling happens after.
-	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdStr))
+	cmdRaw := ""
+	if cmdStr != "" {
+		cmdRaw = " " + cmdSep + " " + cmdStr
+	}
+	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw))
 	pad := strings.Repeat(" ", max0(labelWidth-used))
 
 	dimFg := func(fg string) string {
@@ -258,7 +297,13 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	cmdStyled := ""
 	if cmdStr != "" {
-		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(cmdStr)
+		sepFg := hexTitleTail
+		if cmdSep != "·" { // spinner: live command, accent orange
+			sepFg = hexTitleAccent
+		}
+		cmdStyled = rowStyle(hexSessionName, false, cursor).Render(" ") +
+			rowStyle(dimFg(sepFg), false, cursor).Render(cmdSep) +
+			rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" "+cmdStr)
 	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
 

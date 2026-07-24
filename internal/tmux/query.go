@@ -1,11 +1,15 @@
 package tmux
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Session is one row of `tmux list-sessions`.
 type Session struct {
 	Name      string
 	Attached  bool
+	Clients   int    // number of attached clients (Attached == Clients > 0)
 	ClientTTY string // #{client_tty} of an attached client, "" if none (D8 seam)
 }
 
@@ -31,9 +35,11 @@ func Sessions() []Session {
 		if len(f) < 2 {
 			continue
 		}
+		n, _ := strconv.Atoi(f[1])
 		sessions = append(sessions, Session{
 			Name:      f[0],
-			Attached:  f[1] != "0",
+			Attached:  n > 0,
+			Clients:   n,
 			ClientTTY: ttys[f[0]],
 		})
 	}
