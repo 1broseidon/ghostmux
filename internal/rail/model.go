@@ -165,7 +165,7 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if vis := m.visible(); m.cursor < len(vis) {
 			r := vis[m.cursor]
 			m.clearViewedDone(r)
-			m.vp.point(r.sess, r.window)
+			m.vp.point(r.sess, r.window, r.attached)
 		}
 		m.refresh()
 	case "tab":
@@ -303,7 +303,7 @@ func (m railModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if vis := m.visible(); idx < len(vis) {
 				r := vis[idx]
 				m.clearViewedDone(r)
-				m.vp.point(r.sess, r.window)
+				m.vp.point(r.sess, r.window, r.attached)
 				m.refresh()
 			}
 			return m, nil
@@ -393,7 +393,7 @@ func (m *railModel) createSession(name string) error {
 		return err
 	}
 	m.refresh()
-	m.vp.point(name, "")
+	m.vp.point(name, "", false)
 	m.refresh()
 	return nil
 }
@@ -412,6 +412,11 @@ func (m *railModel) killSession(name string) error {
 		return err
 	}
 	if m.vp.lockSess == name {
+		// A grouped shadow would otherwise survive and keep the killed
+		// session's windows alive in its group.
+		if m.vp.grouped {
+			tmux.Run("kill-session", "-t", "="+gmViewPrefix+name)
+		}
 		m.vp.idle()
 	}
 	m.refresh()
@@ -430,10 +435,12 @@ func (m *railModel) refresh() {
 	}
 	// Follow the viewport's client: ctrl+b navigation inside the inner
 	// session changes its active window — the lock tracks it so ▸, heal,
-	// and the cursor all point at what the viewport actually shows.
+	// and the cursor all point at what the viewport actually shows. When
+	// grouped, the shadow session carries the viewport's own focus.
 	if m.vp.lockSess != "" {
+		target := m.vp.attachTarget()
 		for _, w := range windows {
-			if w.Session == m.vp.lockSess && w.Active {
+			if w.Session == target && w.Active {
 				m.vp.lockWin = w.Index
 				break
 			}

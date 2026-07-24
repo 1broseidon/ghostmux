@@ -113,8 +113,8 @@ func railRows(hub string, v viewState) []railRow {
 func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.Window) []railRow {
 	var rows []railRow
 	for _, s := range sessions {
-		if s.Name == hub {
-			continue
+		if s.Name == hub || strings.HasPrefix(s.Name, gmViewPrefix) {
+			continue // gm-view-* shadows are viewport plumbing, not fleet
 		}
 		// "Attached" means attached ELSEWHERE: the viewport's own nested
 		// client doesn't count, or every viewed session would show ●.
@@ -140,24 +140,28 @@ func buildRows(hub string, v viewState, sessions []tmux.Session, windows []tmux.
 			if len(w.PaneCmds) > 0 {
 				cmd = w.PaneCmds[0]
 			}
-			rows = append(rows, railRow{
+			row := railRow{
 				depth: 0, flat: true, label: s.Name, sess: s.Name,
 				window: w.Index, attached: attached, active: w.Active,
 				bell: w.Bell, done: w.Done, act: w.Activity,
 				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
-			})
+			}
+			suppressViewedMarks(&row)
+			rows = append(rows, row)
 			continue
 		}
 		for _, w := range sessWins {
 			inView := isViewed(v, w.Session, w.Index, w.Active)
-			winRows = append(winRows, railRow{
+			row := railRow{
 				depth: 1, label: w.Index + ":" + w.Name,
 				sess: s.Name, window: w.Index, active: w.Active,
 				bell: w.Bell, done: w.Done, act: w.Activity, inView: inView,
-			})
-			aggBell = aggBell || w.Bell
-			aggDone = aggDone || w.Done
-			aggAct = aggAct || w.Activity
+			}
+			suppressViewedMarks(&row)
+			winRows = append(winRows, row)
+			aggBell = aggBell || row.bell
+			aggDone = aggDone || row.done
+			aggAct = aggAct || row.act
 			aggView = aggView || inView
 		}
 		switch { // single highest-priority aggregate mark
@@ -225,6 +229,16 @@ func matchesFilter(r railRow, query string) bool {
 	return false
 }
 
+// suppressViewedMarks drops attention marks on the row the viewport is
+// showing — you're looking at it, so nothing there needs attention. This also
+// covers grouped (gm-view-*) attaches, where tmux's native alert flags don't
+// clear on the origin session because no client displays its own winlink.
+func suppressViewedMarks(r *railRow) {
+	if r.inView {
+		r.bell, r.done, r.act = false, false, false
+	}
+}
+
 // isViewed reports whether the viewport is showing this window: either it is
 // the explicitly locked window, or the whole session is locked and this is its
 // active window.
@@ -260,7 +274,9 @@ func newDoneTracker() *doneTracker {
 func (dt *doneTracker) observe(windows []tmux.Window, hub string, suppress func(sess, window string) bool) {
 	seen := map[paneKey]bool{}
 	for _, w := range windows {
-		if w.Session == hub {
+		// Skip the hub and gm-view-* shadows — grouped sessions list the
+		// same shared panes again and would double-fire transitions.
+		if w.Session == hub || strings.HasPrefix(w.Session, gmViewPrefix) {
 			continue
 		}
 		for i, cmd := range w.PaneCmds {

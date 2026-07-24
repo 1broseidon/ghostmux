@@ -12,6 +12,12 @@ import (
 // builds; the rail excludes it from the tree and tears it down on quit.
 const hubSession = "hub"
 
+// gmViewPrefix names the transient grouped sessions the viewport attaches
+// through when the target is attached elsewhere (e.g. over ssh): same
+// windows, independent size and current-window, so the other client never
+// fights the viewport. destroy-unattached makes them self-cleaning.
+const gmViewPrefix = "gm-view-"
+
 // viewport is the right-hand pane of the hub: a live nested tmux client the
 // rail re-points without ever moving itself.
 type viewport struct {
@@ -20,23 +26,44 @@ type viewport struct {
 	lockSess string // session currently rendered, "" = idle
 	lockWin  string // window index within lockSess
 	detached bool   // user pressed d — heal re-idles instead of re-pointing
+	grouped  bool   // attached via a gm-view-* grouped session
+}
+
+// attachTarget is the session name the viewport's client is actually attached
+// to: the grouped shadow when grouped, otherwise the session itself.
+func (v viewport) attachTarget() string {
+	if v.grouped {
+		return gmViewPrefix + v.lockSess
+	}
+	return v.lockSess
 }
 
 // point respawns the viewport as a nested tmux client rendering sess (and a
-// window, if given). It updates the lock and clears the viewed window's marks.
-func (v *viewport) point(sess, window string) {
+// window, if given). grouped attaches through a transient session group so an
+// ssh (or any outside) client on the same session keeps its own size and
+// focus. It updates the lock and clears the viewed window's marks.
+func (v *viewport) point(sess, window string, grouped bool) {
 	if v.pane == "" || sess == "" {
 		return
 	}
 	// TMUX= lets a client attach from inside tmux; the socket args keep the
-	// nested client on the server the rail is driving; \; chains a window
-	// selection onto the attach.
-	attach := fmt.Sprintf("TMUX= tmux%s attach-session -t '=%s'", tmux.ArgvString(), sess)
+	// nested client on the server the rail is driving; \; chains commands
+	// onto the attach.
+	target := sess
+	var attach string
+	if grouped {
+		target = gmViewPrefix + sess
+		attach = fmt.Sprintf(
+			"TMUX= tmux%s new-session -A -s '%s' -t '=%s' \\; set-option destroy-unattached on \\; set-option status-left '[%s] '",
+			tmux.ArgvString(), target, sess, sess)
+	} else {
+		attach = fmt.Sprintf("TMUX= tmux%s attach-session -t '=%s'", tmux.ArgvString(), sess)
+	}
 	if window != "" {
-		attach += fmt.Sprintf(" \\; select-window -t '=%s:%s'", sess, window)
+		attach += fmt.Sprintf(" \\; select-window -t '=%s:%s'", target, window)
 	}
 	tmux.Run("respawn-pane", "-k", "-t", v.pane, attach)
-	v.lockSess, v.lockWin, v.detached = sess, window, false
+	v.lockSess, v.lockWin, v.detached, v.grouped = sess, window, false, grouped
 	if window != "" {
 		tmux.SetDone(sess, window, false)
 	}
@@ -62,7 +89,7 @@ func (v *viewport) heal() bool {
 	if v.detached || v.lockSess == "" {
 		v.idle()
 	} else {
-		v.point(v.lockSess, v.lockWin)
+		v.point(v.lockSess, v.lockWin, v.grouped)
 	}
 	return true
 }

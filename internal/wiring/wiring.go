@@ -264,6 +264,9 @@ func CmdRestore() error {
 	restored := 0
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		name, attached, ok := strings.Cut(line, "\t")
+		if strings.HasPrefix(name, "gm-view-") || name == "hub" {
+			continue // ghostmux plumbing, not user sessions
+		}
 		if !ok || attached != "0" {
 			continue
 		}
