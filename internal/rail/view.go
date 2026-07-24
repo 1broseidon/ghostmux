@@ -19,6 +19,7 @@ const (
 	hexCursorBg     = "#504945" // cursor bar background / dimmed fg
 	hexInactiveWin  = "#928374"
 	hexFilterCursor = "#ebdbb2"
+	hexAgent        = "#d3869b" // detected agent command (design palette "agent accent")
 )
 
 var (
@@ -143,7 +144,6 @@ func emptyStateBody(height int) string {
 		"  no sessions yet",
 		"",
 		"  " + newKeyHint("n", "new session"),
-		"  " + newKeyHint("a", "agent session"),
 		"",
 		"  sessions made anywhere",
 		"  (tmux new, ambient, ssh)",
@@ -291,7 +291,14 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	cmdStyled := ""
 	if cmdStr != "" {
-		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" · " + cmdStr)
+		// Ambient agent detection: a recognized agent command renders in the
+		// agent accent — observed from the slot, not declared by a name.
+		cmdFg := hexInactiveWin
+		if isAgentCmd(r.cmd) {
+			cmdFg = hexAgent
+		}
+		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" · ") +
+			rowStyle(dimFg(cmdFg), false, cursor).Render(cmdStr)
 	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
 

@@ -394,7 +394,7 @@ func freeGMName() string {
 
 // FreeName returns the lowest-numbered "<prefix><numFmt(n)>" session name not
 // currently in use, e.g. FreeName("gm-", "%d") → "gm-0", "gm-1", ...;
-// FreeName("gm-agent-", "%02d") → "gm-agent-00", "gm-agent-01", ... Shared by
+// FreeName("gm-", "%d") → "gm-0", "gm-1", ... Shared by
 // CmdShell's orphan-claiming and the rail's `a` (new agent session) key.
 func FreeName(prefix, numFmt string) string {
 	used := map[string]bool{}

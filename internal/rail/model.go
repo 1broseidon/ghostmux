@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
-	"github.com/1broseidon/ghostmux/internal/wiring"
 )
 
 type railTick time.Time
@@ -173,10 +172,6 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input = newPromptInput()
 		m.errMsg = ""
 		return m, textinput.Blink
-	case "a":
-		if err := m.agentSession(); err != nil {
-			m.flashError(err)
-		}
 	case "x":
 		if vis := m.visible(); m.cursor < len(vis) {
 			m.mode = modeKillConfirm
@@ -386,13 +381,6 @@ func (m *railModel) createSession(name string) error {
 	m.vp.point(name, "", false)
 	m.refresh()
 	return nil
-}
-
-// agentSession creates the lowest-free gm-agent-NN session with no prompt and
-// points the viewport at it (Task 9, `a` key).
-func (m *railModel) agentSession() error {
-	name := wiring.FreeName("gm-agent-", "%02d")
-	return m.createSession(name)
 }
 
 // killSession kills a session by name; if it held the viewport lock, the

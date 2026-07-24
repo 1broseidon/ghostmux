@@ -37,10 +37,13 @@ ghostmux — never by claiming a pane you were already using.
   clicking between the rail and the viewport focuses them, regardless of
   your own tmux mouse setting elsewhere.
 - **Keymap:** `j/k`/`↓↑` move · `g`/`G` first/last · `↵` view in viewport ·
-  `tab` collapse/expand · `n` new session · `a` new agent session
-  (`gm-agent-NN`) · `x` kill (`y`/`n` confirm) · `/` filter · `r` refresh ·
-  `d` detach the viewport (goes idle) · `?` help popup · `q` quit (tears
-  down the hub).
+  `tab` collapse/expand · `n` new session · `x` kill (`y`/`n` confirm) ·
+  `/` filter · `r` refresh · `d` detach the viewport (goes idle) · `?` help ·
+  `q` quit (tears down the hub).
+- **Ambient agent detection.** There is one kind of session. The rail
+  observes what runs in each slot: a recognized agent CLI (`claude`,
+  `codex`, `aider`, ...) renders in the agent accent; anything else is just
+  a command. No naming conventions, no declared types — evidence only.
 - **Gutter legend:** `●` bell · `✓` done (the foreground command exited back
   to a shell while you weren't looking) · `~` activity · `▸` currently in
   the viewport. Highest-priority mark wins when a session aggregates its

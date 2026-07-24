@@ -19,7 +19,6 @@ var keyHelpTable = []keyHelp{
 	{"↵", "view in pane →"},
 	{"tab", "collapse / expand session"},
 	{"n", "new session"},
-	{"a", "new agent session (gm-agent-NN)"},
 	{"x", "kill selected (y/n confirm)"},
 	{"/", "filter rows"},
 	{"r", "refresh now (auto: 1s)"},

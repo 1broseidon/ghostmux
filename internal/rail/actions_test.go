@@ -14,7 +14,7 @@ import (
 func TestKeyHelpCoversBoundKeys(t *testing.T) {
 	// boundKeys mirrors updateNormalKey's switch cases exactly; keep the two
 	// lists in sync when the keymap changes.
-	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "a", "x", "/", "d", "?"}
+	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?"}
 
 	var haystack strings.Builder
 	for _, k := range keyHelpTable {
@@ -38,8 +38,8 @@ func TestKeyHelpCoversBoundKeys(t *testing.T) {
 			t.Errorf("bound key %q (needle %q) not documented in keyHelpTable", key, needle)
 		}
 	}
-	if len(keyHelpTable) < 12 {
-		t.Errorf("keyHelpTable has %d entries, want >= 12 (screen-6 keymap)", len(keyHelpTable))
+	if len(keyHelpTable) < 11 {
+		t.Errorf("keyHelpTable has %d entries, want >= 11 (screen-6 keymap minus the removed `a`)", len(keyHelpTable))
 	}
 }
 
@@ -155,30 +155,16 @@ func TestCreateSessionPropagatesTmuxError(t *testing.T) {
 	}
 }
 
-func TestAgentSessionPicksLowestFreeNN(t *testing.T) {
-	orig := tmux.Runner
-	var newSessionArgs []string
-	tmux.Runner = func(args ...string) (string, error) {
-		if args[0] == "list-sessions" {
-			return "gm-agent-00\n", nil
+// TestAmbientAgentDetection: agent-ness is observed from the foreground
+// command, never declared by a name or a separate session type.
+func TestAmbientAgentDetection(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		"claude": true, "codex": true, "aider": true,
+		"npm": false, "vite": false, "zsh": false, "go": false,
+	} {
+		if got := isAgentCmd(cmd); got != want {
+			t.Errorf("isAgentCmd(%q) = %v, want %v", cmd, got, want)
 		}
-		if args[0] == "new-session" {
-			newSessionArgs = args
-		}
-		return "", nil
-	}
-	t.Cleanup(func() { tmux.Runner = orig })
-
-	m := &railModel{vp: viewport{pane: "%1", idleCmd: "x"}}
-	if err := m.agentSession(); err != nil {
-		t.Fatalf("agentSession: %v", err)
-	}
-	if m.vp.lockSess != "gm-agent-01" {
-		t.Errorf("agentSession created %q, want gm-agent-01", m.vp.lockSess)
-	}
-	joined := strings.Join(newSessionArgs, " ")
-	if !strings.Contains(joined, "gm-agent-01") {
-		t.Errorf("new-session args = %v, want gm-agent-01", newSessionArgs)
 	}
 }
 

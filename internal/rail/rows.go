@@ -30,6 +30,17 @@ type railRow struct {
 // non-shell → shell transition is what marks a window done (D5).
 var shellCmds = map[string]bool{"zsh": true, "bash": true, "fish": true, "sh": true, "dash": true}
 
+// agentCmds are foreground commands recognized as AI agents. Agent-ness is
+// ambient: observed from what actually runs in the slot, never declared by a
+// naming convention or a separate session type.
+var agentCmds = map[string]bool{
+	"claude": true, "codex": true, "aider": true, "gemini": true,
+	"goose": true, "amp": true, "oa": true, "sol": true, "pi": true,
+}
+
+// isAgentCmd reports whether a foreground command is a recognized agent.
+func isAgentCmd(cmd string) bool { return agentCmds[cmd] }
+
 // viewState is what the viewport is currently showing, used to compute inView
 // marks and to suppress the done mark on a session the user is watching.
 type viewState struct {
