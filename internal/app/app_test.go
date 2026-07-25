@@ -96,8 +96,8 @@ func TestStatusLineFollowsFocus(t *testing.T) {
 func TestViewportSizeLeavesRoomForRailDividerStatus(t *testing.T) {
 	m := soloModel{w: 120, h: 40}
 	vw, bodyH := m.viewportSize()
-	if vw != 120-rail.Width-1 {
-		t.Errorf("viewport width = %d, want %d", vw, 120-rail.Width-1)
+	if vw != 120-rail.Width()-1 {
+		t.Errorf("viewport width = %d, want %d", vw, 120-rail.Width()-1)
 	}
 	if bodyH != 39 {
 		t.Errorf("viewport height = %d, want 39 (one row for status)", bodyH)

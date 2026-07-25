@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Groups are the first thing ghostmux owns that it cannot rediscover.
@@ -36,6 +37,33 @@ type Group struct {
 type groupState struct {
 	Groups    []Group  `json:"groups"`
 	Collapsed []string `json:"collapsed,omitempty"` // fold keys (see foldKey)
+	// Dirs is where each grouped member was last observed running, memberKey →
+	// path. It is captured from evidence (#{session_path}), never asked for, and
+	// exists so a ghost can be summoned back into the directory it belonged to.
+	// Omitted when empty so a fleet that has never had a ghost writes the same
+	// file it always did.
+	Dirs map[string]string `json:"dirs,omitempty"`
+	// Settings is what the user changed through the settings pane. It rides in
+	// this file rather than a config file of its own because it is the same
+	// kind of thing as a group: a decision no multiplexer can report back. The
+	// file is "the state file", not "the groups file".
+	Settings *Settings `json:"settings,omitempty"`
+}
+
+// Settings is the user-editable half of the state file. Every field is
+// optional: an absent field means "whatever the default is", so a file written
+// before settings existed loads unchanged and an untouched setting is never
+// written down.
+type Settings struct {
+	Toggle    []string `json:"toggle,omitempty"`     // bubbletea key names
+	RailWidth int      `json:"rail_width,omitempty"` // 0 = default
+	Agents    []string `json:"agents,omitempty"`     // extra agent cmds
+}
+
+// empty reports whether nothing has been set — the condition for leaving the
+// key out of the file entirely.
+func (s Settings) empty() bool {
+	return len(s.Toggle) == 0 && s.RailWidth == 0 && len(s.Agents) == 0
 }
 
 // memberKey identifies a session across backends. tmux is spelled out rather
@@ -45,6 +73,25 @@ func memberKey(backend, sess string) string {
 		backend = "tmux"
 	}
 	return backend + ":" + sess
+}
+
+// backendOf and sessOf invert memberKey. backendOf answers in railRow's
+// spelling, where tmux is "" — the file says "tmux:api" so it reads as data,
+// the row says "" so tmux stays the zero-value default.
+func backendOf(key string) string {
+	b, _, ok := strings.Cut(key, ":")
+	if !ok || b == "tmux" {
+		return ""
+	}
+	return b
+}
+
+func sessOf(key string) string {
+	_, s, ok := strings.Cut(key, ":")
+	if !ok {
+		return key
+	}
+	return s
 }
 
 // groupsPath is the state file location: XDG_STATE_HOME, else ~/.local/state.
@@ -61,41 +108,50 @@ func groupsPath() string {
 	return filepath.Join(dir, "ghostmux", "groups.json")
 }
 
-// loadState reads the state file. A missing or unreadable file is not an
-// error: no groups is the normal state, and a corrupt file must never stop
-// the panel from opening — the rail degrades to a flat fleet.
-func loadState() ([]Group, map[string]bool) {
+// readState reads the whole document. A missing, unreadable, or corrupt file
+// is not an error: no state is the normal state, and a bad file must never
+// stop the panel from opening. It is the single reader — every caller that
+// wants one field still goes through here, so a save that rewrites the file
+// can never drop a field it did not know about.
+func readState() groupState {
 	path := groupsPath()
 	if path == "" {
-		return nil, map[string]bool{}
+		return groupState{}
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, map[string]bool{}
+		return groupState{}
 	}
 	var st groupState
 	if json.Unmarshal(b, &st) != nil {
-		return nil, map[string]bool{}
+		return groupState{}
 	}
+	return st
+}
+
+// loadState reads the rail's own three fields. A missing or unreadable file is
+// not an error: no groups is the normal state, and a corrupt file must never
+// stop the panel from opening — the rail degrades to a flat fleet.
+func loadState() ([]Group, map[string]bool, map[string]string) {
+	st := readState()
 	collapsed := make(map[string]bool, len(st.Collapsed))
 	for _, k := range st.Collapsed {
 		collapsed[k] = true
 	}
-	return st.Groups, collapsed
+	// A file written before dirs existed unmarshals a nil map; hand back an
+	// empty one so every caller can write to it without a nil check.
+	dirs := st.Dirs
+	if dirs == nil {
+		dirs = map[string]string{}
+	}
+	return st.Groups, collapsed, dirs
 }
 
 // saveState writes the state file, creating its directory. Errors are
 // returned so the caller can flash them; the in-memory state still stands for
 // this run. Only folded keys are written — an unfolded row is the default and
 // does not need recording.
-func saveState(groups []Group, collapsed map[string]bool) error {
-	path := groupsPath()
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
+func saveState(groups []Group, collapsed map[string]bool, dirs map[string]string) error {
 	folded := make([]string, 0, len(collapsed))
 	for k, v := range collapsed {
 		if v {
@@ -103,14 +159,97 @@ func saveState(groups []Group, collapsed map[string]bool) error {
 		}
 	}
 	sort.Strings(folded) // stable file: no spurious diffs between runs
+	if len(dirs) == 0 {
+		dirs = nil // omitempty: no ghost dirs recorded, no key in the file
+	}
+	// Read-modify-write: settings belong to the frame, not to the rail, and a
+	// rail save that wrote its own three fields alone would silently erase
+	// them. Safe because the frame and the rail share one process and one
+	// single-threaded bubbletea update loop.
+	st := readState()
+	st.Groups, st.Collapsed, st.Dirs = groups, folded, dirs
+	return writeState(st)
+}
+
+// writeState serializes the whole document, creating its directory. Errors are
+// returned so the caller can flash them; the in-memory state still stands for
+// this run.
+func writeState(st groupState) error {
+	path := groupsPath()
+	if path == "" {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(groupState{Groups: groups, Collapsed: folded}, "", "  ")
+	if st.Settings != nil && st.Settings.empty() {
+		st.Settings = nil // nothing set: no key in the file
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+// LoadSettings reads the user-editable half of the state file. An absent
+// settings key is not an error — it is the normal state — so the zero value
+// comes back and every field falls through to its default.
+func LoadSettings() Settings {
+	st := readState()
+	if st.Settings == nil {
+		return Settings{}
+	}
+	return *st.Settings
+}
+
+// SaveSettings writes settings back, leaving groups, folds, and dirs exactly
+// as they are on disk. Same read-modify-write, same reason: the two halves of
+// this file have two owners, and neither may erase the other's.
+func SaveSettings(s Settings) error {
+	st := readState()
+	if s.empty() {
+		st.Settings = nil
+	} else {
+		st.Settings = &s
+	}
+	return writeState(st)
+}
+
+// StateInfo is what can be PROVEN about the state file: where it is, whether
+// it exists, what it holds, and when it last changed. Counts are read from the
+// file, never from the live fleet — the settings pane reports the file, and a
+// number taken from memory would be reporting something else.
+type StateInfo struct {
+	Path      string
+	Exists    bool
+	Groups    int
+	Members   int
+	Dirs      int
+	Collapsed int
+	ModTime   time.Time
+}
+
+// StateFile reports the state file's facts. A missing file is not an error: it
+// is the normal state before the first group is made.
+func StateFile() StateInfo {
+	info := StateInfo{Path: groupsPath()}
+	if info.Path == "" {
+		return info
+	}
+	fi, err := os.Stat(info.Path)
+	if err != nil {
+		return info
+	}
+	info.Exists, info.ModTime = true, fi.ModTime()
+	st := readState()
+	info.Groups = len(st.Groups)
+	for _, g := range st.Groups {
+		info.Members += len(g.Members)
+	}
+	info.Dirs = len(st.Dirs)
+	info.Collapsed = len(st.Collapsed)
+	return info
 }
 
 // groupKey namespaces a group in the collapse map, so a group and a session
@@ -147,7 +286,7 @@ func removeMember(groups []Group, key string) []Group {
 // with no group keep their current shape and follow the groups, so a user who
 // has made no groups sees exactly the rail they saw before — grouping is
 // invisible until used.
-func applyGroups(rows []railRow, groups []Group) []railRow {
+func applyGroups(rows []railRow, groups []Group, dirs map[string]string) []railRow {
 	if len(groups) == 0 {
 		return rows
 	}
@@ -177,16 +316,31 @@ func applyGroups(rows []railRow, groups []Group) []railRow {
 		// would hide exactly the thing the rail exists to surface.
 		var members []railRow
 		for _, key := range g.Members {
-			b, ok := byKey[key]
-			if !ok || used[key] {
-				continue // session is gone, or listed in two groups
+			if used[key] {
+				continue // listed in two groups: the first one keeps it
 			}
 			used[key] = true
+			b, ok := byKey[key]
+			if !ok {
+				// No session behind the name — but the name is still declared
+				// here, and the user put it there. Dropping the row would lose
+				// the declaration; showing it as a ghost keeps both facts and
+				// makes the fleet survive a reboot.
+				name := sessOf(key)
+				members = append(members, railRow{
+					depth: 1, ghost: true, flat: true,
+					label: name, sess: name, backend: backendOf(key),
+					group: g.Name, dir: dirs[key],
+				})
+				continue
+			}
 			for _, r := range b.rows {
 				r.depth++
 				r.group = g.Name
 				members = append(members, r)
-				if !r.isWin {
+				// Ghosts never feed the header's marks: there is no process
+				// there to have rung a bell or finished anything.
+				if !r.isWin && !r.ghost {
 					gr.bell = gr.bell || r.bell
 					gr.done = gr.done || r.done
 					gr.act = gr.act || r.act
@@ -194,7 +348,7 @@ func applyGroups(rows []railRow, groups []Group) []railRow {
 				}
 			}
 		}
-		gr.count = countSessions(members)
+		gr.count, gr.ghostCount = countMembers(members)
 		out = append(out, gr)
 		out = append(out, members...)
 	}
@@ -206,15 +360,22 @@ func applyGroups(rows []railRow, groups []Group) []railRow {
 	return out
 }
 
-// countSessions counts session rows (not windows) in a member list.
-func countSessions(rows []railRow) int {
-	n := 0
+// countMembers counts session rows (not windows) in a member list, live and
+// ghost separately. A folded group reports them separately too — "2 ○1" is a
+// different fleet from "3", and collapsing the two would be the inference this
+// rail refuses to make.
+func countMembers(rows []railRow) (live, ghosts int) {
 	for _, r := range rows {
-		if !r.isWin {
-			n++
+		if r.isWin {
+			continue
 		}
+		if r.ghost {
+			ghosts++
+			continue
+		}
+		live++
 	}
-	return n
+	return live, ghosts
 }
 
 // --- model actions ---
@@ -364,18 +525,21 @@ type errNamed string
 func (e errNamed) Error() string { return string(e) }
 
 // forgetMember drops a killed session from its group, so the state file does
-// not accumulate entries for sessions that will never come back.
+// not accumulate entries for sessions that will never come back. Its recorded
+// dir goes with it: a directory we are no longer declaring anything about is
+// just stale evidence.
 func (m *railModel) forgetMember(key string) {
 	if groupOf(m.groups, key) == "" {
 		return
 	}
 	m.groups = removeMember(m.groups, key)
+	delete(m.dirs, key)
 	m.saveState()
 }
 
-// saveState persists everything the rail owns: group membership and fold
-// state. Called after any change to either.
-func (m *railModel) saveState() error { return saveState(m.groups, m.collapsed) }
+// saveState persists everything the rail owns: group membership, fold state,
+// and the observed dirs of grouped members. Called after any change to any.
+func (m *railModel) saveState() error { return saveState(m.groups, m.collapsed, m.dirs) }
 
 // toggleFold folds or unfolds a row and records it, so a folded group is
 // still folded next launch.

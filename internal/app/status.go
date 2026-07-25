@@ -71,6 +71,13 @@ func railKeys(toggle string) []barKey {
 	)
 }
 
+// settingsKeys is the keymap while settings is the frame. The toggle is not
+// offered because it does nothing here, and a bar that advertised it would be
+// the same lie as a help page naming a dead key.
+func settingsKeys() []barKey {
+	return []barKey{{"j/k", "section"}, {"↵", "edit"}, {"esc", "back"}}
+}
+
 // viewportKeys is the keymap while the viewport has focus. There is exactly
 // one: everything else belongs to the program you are looking at, and saying
 // so is the honest thing for the bar to do.
@@ -84,7 +91,10 @@ func (m soloModel) statusLine(width int) string {
 		return ""
 	}
 	block, keys := styBlock, railKeys(m.toggleLabel)
-	if m.focus == focusViewport {
+	switch {
+	case m.settings != nil:
+		keys = settingsKeys()
+	case m.focus == focusViewport:
 		block, keys = styBlockVp, viewportKeys(m.toggleLabel)
 	}
 	left := block.Render(" gmx ")

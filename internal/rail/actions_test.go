@@ -16,7 +16,9 @@ import (
 func TestKeyHelpCoversBoundKeys(t *testing.T) {
 	// boundKeys mirrors updateNormalKey's switch cases exactly; keep the two
 	// lists in sync when the keymap changes.
-	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "/", "d", "?", "l", "right", "z"}
+	// `?` and `,` are not here: the frame intercepts them, so updateNormalKey
+	// no longer dispatches on either. The table still documents them.
+	boundKeys := []string{"q", "j", "k", "down", "up", "g", "G", "r", "enter", "tab", "n", "x", "S", "/", "d", "l", "right", "z"}
 
 	var haystack strings.Builder
 	for _, k := range keyHelpRows() {
@@ -230,21 +232,27 @@ func TestMoveCursorSkipsDimmedRows(t *testing.T) {
 }
 
 // TestAuxSessionsParseZellij: zellij rows come only from provable list
-// output — EXITED and prose lines are skipped, marks stay empty.
+// output — prose is skipped, marks stay empty, and an EXITED session is kept
+// as a ghost because zellij's own label says the name still exists and
+// attaching brings it back.
 func TestAuxSessionsParseZellij(t *testing.T) {
 	origList, origPresent := zellijList, zellijPresent
 	zellijPresent = true
 	zellijList = func() (string, error) {
-		return "alpha [Created 2h ago]\nbeta [Created 1m ago] (EXITED - attach to resurrect)\ngamma [Created 5s ago]\n", nil
+		return "alpha [Created 2h ago]\nbeta [Created 1m ago] (EXITED - attach to resurrect)\n" +
+			"gamma [Created 5s ago]\nNo active zellij sessions found.\n", nil
 	}
 	t.Cleanup(func() { zellijList, zellijPresent = origList, origPresent })
 
 	aux := auxSessions()
-	if len(aux) != 2 || aux[0].name != "alpha" || aux[1].name != "gamma" {
-		t.Fatalf("auxSessions = %+v, want alpha+gamma only", aux)
+	if len(aux) != 3 || aux[0].name != "alpha" || aux[1].name != "beta" || aux[2].name != "gamma" {
+		t.Fatalf("auxSessions = %+v, want alpha+beta+gamma (prose skipped)", aux)
+	}
+	if aux[0].exited || !aux[1].exited || aux[2].exited {
+		t.Errorf("EXITED not read off the right row: %+v", aux)
 	}
 	rows := auxRows(aux, ViewState{Backend: "zellij", Sess: "gamma"})
-	if !rows[1].inView || rows[0].inView {
+	if !rows[2].inView || rows[0].inView {
 		t.Errorf("inView marks wrong: %+v", rows)
 	}
 	if rows[0].bell || rows[0].act || rows[0].done || rows[0].attached {
@@ -253,6 +261,17 @@ func TestAuxSessionsParseZellij(t *testing.T) {
 	if rows[0].cmd != "zellij" || !rows[0].flat {
 		t.Errorf("zellij row rendering fields wrong: %+v", rows[0])
 	}
+	// The exited row is a ghost: ○ and nothing else, ever.
+	ghost := rows[1]
+	if !ghost.ghost {
+		t.Errorf("EXITED row not rendered as a ghost: %+v", ghost)
+	}
+	if ghost.bell || ghost.act || ghost.done || ghost.attached || ghost.inView {
+		t.Errorf("exited zellij row carries unproven marks: %+v", ghost)
+	}
+	if ghost.gutter() != "○" {
+		t.Errorf("exited zellij gutter = %q, want ○", ghost.gutter())
+	}
 }
 
 // TestInHostExcludesOwnSession: a standalone frame relaunched inside a
@@ -260,6 +279,7 @@ func TestAuxSessionsParseZellij(t *testing.T) {
 // render the frame inside itself. This is what makes `tmux new -A -s gm
 // ghostmux solo` (resume for free) safe.
 func TestInHostExcludesOwnSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // New() reads state: never the real file
 	withFakeRunner(t, map[string]string{
 		"list-sessions": "alpha\t0\ngm\t1\n",
 		"list-windows": "alpha\t1\tzsh\t1\t0\t0\t0\n" +
@@ -278,6 +298,7 @@ func TestInHostExcludesOwnSession(t *testing.T) {
 
 // TestInHostExcludesOwnAuxSession is the same guarantee on a non-tmux host.
 func TestInHostExcludesOwnAuxSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // New() reads state: never the real file
 	origList, origPresent := zellijList, zellijPresent
 	zellijPresent = true
 	zellijList = func() (string, error) { return "gm [Created 1m ago]\nother [Created 2m ago]\n", nil }
@@ -293,6 +314,7 @@ func TestInHostExcludesOwnAuxSession(t *testing.T) {
 // TestCreateRoutesToZellijBackend: the multi-backend promise has to hold for
 // making sessions, not just listing them — on a zellij-only box `n` must work.
 func TestCreateRoutesToZellijBackend(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // refresh() can persist: never the real file
 	var created []string
 	origCreate, origPresent := createAux, zellijPresent
 	zellijPresent = true

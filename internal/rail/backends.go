@@ -17,6 +17,7 @@ import (
 type auxSession struct {
 	backend string // "zellij"
 	name    string
+	exited  bool // zellij lists it as "(EXITED - attach to resurrect)"
 }
 
 // zellijList runs `zellij list-sessions --no-formatting`; injectable for
@@ -44,17 +45,22 @@ func auxSessions() []auxSession {
 	var sessions []auxSession
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
-		// Format: "name [Created 2h ago]" — EXITED sessions are dead
-		// (resurrectable) and "No active zellij sessions found." is prose.
-		if line == "" || strings.Contains(line, "EXITED") || strings.HasPrefix(line, "No active") {
+		// Format: "name [Created 2h ago]", with "(EXITED - attach to
+		// resurrect)" appended for a session zellij has serialized but is not
+		// running. That is zellij's own word for a ghost, so we relay it
+		// instead of dropping the row: the name still exists, and attaching
+		// really does bring it back. "No active zellij sessions found." is
+		// prose, not a session.
+		if line == "" || strings.HasPrefix(line, "No active") {
 			continue
 		}
+		exited := strings.Contains(line, "EXITED")
 		name, _, ok := strings.Cut(line, " ")
 		if !ok {
 			name = line
 		}
 		if name != "" {
-			sessions = append(sessions, auxSession{backend: "zellij", name: name})
+			sessions = append(sessions, auxSession{backend: "zellij", name: name, exited: exited})
 		}
 	}
 	return sessions
@@ -67,8 +73,10 @@ func auxRows(aux []auxSession, v ViewState) []railRow {
 	for _, s := range aux {
 		rows = append(rows, railRow{
 			depth: 0, flat: true, label: s.name, sess: s.name,
-			backend: s.backend, cmd: s.backend,
-			inView: v.Backend == s.backend && v.Sess == s.name,
+			backend: s.backend, cmd: s.backend, ghost: s.exited,
+			// An exited session cannot be the one in the viewport, and a ghost
+			// carries no marks anyway — so the lock only ever lights a live row.
+			inView: !s.exited && v.Backend == s.backend && v.Sess == s.name,
 		})
 	}
 	return rows
@@ -122,6 +130,17 @@ var killAux = func(backend, name string) error {
 		return exec.Command("zellij", "kill-session", name).Run()
 	}
 	return nil
+}
+
+// deleteAux removes a backend's serialized session — the dead half of the
+// fleet, not a running process. It is what `x` means on a zellij ghost: kill
+// has nothing left to kill, so the honest verb is delete. Injectable for tests.
+var deleteAux = func(backend, name string) error {
+	switch backend {
+	case "zellij":
+		return exec.Command("zellij", "delete-session", "--force", name).Run()
+	}
+	return fmt.Errorf("unknown backend %q", backend)
 }
 
 // HasBackend reports whether a non-tmux backend is installed, so a frame never

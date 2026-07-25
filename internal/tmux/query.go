@@ -11,6 +11,7 @@ type Session struct {
 	Attached  bool
 	Clients   int    // number of attached clients (Attached == Clients > 0)
 	ClientTTY string // #{client_tty} of an attached client, "" if none (D8 seam)
+	Path      string // #{session_path}: where the session was started (ghosts)
 }
 
 // Window is one row of `tmux list-windows -a`, plus the current commands of
@@ -30,17 +31,25 @@ type Window struct {
 func Sessions() []Session {
 	ttys := clientTTYs()
 	var sessions []Session
-	for _, line := range Lines("list-sessions", "-F", "#{session_name}\t#{session_attached}") {
+	for _, line := range Lines("list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_path}") {
 		f := strings.Split(line, "\t")
 		if len(f) < 2 {
 			continue
 		}
 		n, _ := strconv.Atoi(f[1])
+		// session_path is the newest field and the only optional one: a row
+		// without it is still a session, so a short row must never drop the
+		// whole session (nor must a tmux too old to know the format).
+		path := ""
+		if len(f) >= 3 {
+			path = f[2]
+		}
 		sessions = append(sessions, Session{
 			Name:      f[0],
 			Attached:  n > 0,
 			Clients:   n,
 			ClientTTY: ttys[f[0]],
+			Path:      path,
 		})
 	}
 	return sessions

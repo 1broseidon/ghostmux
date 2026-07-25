@@ -91,11 +91,40 @@ else fail "focus: F12 did not hand the keyboard over"; cap | head -14; fi
 # back to the rail, and prove `q` is a rail key again (not sent to the child)
 tmux $TA send-keys -t zdriver F12; sleep 0.8
 
-# the help page must name the keys actually bound, or it is worse than nothing
+# the help overlay must name the keys actually bound, or it is worse than
+# nothing — and it must name them WHOLE. In the 30-column rail this row read
+# "ctrl+\  toggle rail ⇄ vi…", which is exactly the row a user whose desktop
+# grabbed the chord needs intact.
 send "?"
 if cap | grep -q "F12\|f12"; then pass "help: ? reports the real toggle keys"
 else fail "help: ? does not show the bound toggle"; cap | head -18; fi
-send "?"
+if cap | grep -q "ghostmux · keys"; then pass "help: ? draws the overlay box with its title"
+else fail "help: no overlay title"; cap | head -18; fi
+if cap | grep -q "start group's dead sessions"; then
+  pass "help: the longest keymap row renders un-truncated"
+else fail "help: keymap row truncated in the overlay"; cap | head -20; fi
+# any key closes it — including a key the rail would otherwise act on
+send "j"
+if cap | grep -q "ghostmux · keys"; then fail "help: overlay survived a keypress"; cap | head -8
+else pass "help: any key closes the overlay"; fi
+if cap | grep -q "alpha"; then pass "help: rail rows are back after the overlay closed"
+else fail "help: rail did not come back"; cap | head -10; fi
+
+# --- settings: a mode, because sections/fields honor the panes' contract ---
+send ","
+if cap | grep -q "Backends"; then pass "settings: , opened the sections list"
+else fail "settings: , did not open settings"; cap | head -12; fi
+if cap | grep -q "About"; then pass "settings: every section listed"
+else fail "settings: sections missing"; cap | head -12; fi
+# the fleet stays live underneath: a session made now must be there on the way out
+tmux $TA new-session -d -s settled -x 80 -y 20
+sleep 1.5
+send "" Escape
+if cap | grep -q "alpha"; then pass "settings: esc restored the session rows"
+else fail "settings: rail did not come back after esc"; cap | head -12; fi
+if cap | grep -q "settled"; then pass "settings: the fleet stayed live while settings was open"
+else fail "settings: session created during settings is missing"; cap | head -12; fi
+tmux $TA kill-session -t =settled 2>/dev/null
 
 # --- detach: d idles the viewport without touching the session ---
 send "d"
@@ -185,8 +214,15 @@ send "" Enter
 if cap | grep -q "work"; then pass "group: a created a named group folder"
 else fail "group: folder not rendered"; cap | head -10; fi
 
-# move a session up into the group (ungrouped rows sit below every group)
-send "G"
+# move a session up into the group (ungrouped rows sit below every group).
+# Filter to gamma first: the rail also lists the developer's real zellij
+# sessions — including EXITED ones, as ghosts — and those are appended last,
+# so counting from the bottom would grab somebody else's session.
+send "/"
+tmux $TA send-keys -t zdriver "gamma"; sleep 0.5
+send "" Enter
+send "g"
+send "j"
 send "K"
 if [ -f "$XDG_STATE_HOME/ghostmux/groups.json" ]; then pass "group: membership persisted to the state file"
 else fail "group: no state file written"; fi
@@ -214,6 +250,144 @@ else fail "group: lost on relaunch"; cap | head -10; fi
 if cap | grep -q "▸ work"; then pass "group: still folded after relaunch"
 else fail "group: sprang open on relaunch"; cap | head -10; fi
 send "q"
+
+
+# --- ghosts: the fleet outlives its processes ---
+# Grouping IS the declaration, so a member whose session is gone does not
+# vanish from the rail: it renders as a ghost — dim, ○, still in its folder —
+# and ↵ starts it again in the dir it was last observed in. Nothing here is a
+# restore: the name and the dir are the whole claim, and both are facts the
+# rail watched while the session lived.
+#
+# Its own state dir, so the grouping section above cannot decide what this one
+# sees. The other scratch sessions go first: with only the declared one left,
+# the cursor lands where the test says it does.
+GHOSTSTATE=$(mktemp -d)
+GHOSTRUN="XDG_STATE_HOME='$GHOSTSTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN"
+GJSON="$GHOSTSTATE/ghostmux/groups.json"
+
+tmux $TA kill-session -t zdriver 2>/dev/null
+for s in alpha beta gamma notmux; do tmux $TA kill-session -t "=$s" 2>/dev/null; done
+tmux $TA new-session -d -s zdriver -x 120 -y 32
+tmux $TA new-session -d -s ghosty -c /tmp -x 80 -y 20
+tmux $TA send-keys -t zdriver "$GHOSTRUN" Enter
+sleep 2.5
+
+send "a"
+tmux $TA send-keys -t zdriver "fleet"; sleep 0.5
+send "" Enter
+# g/j, never G: the rail also lists whatever zellij sessions the developer
+# really has, and those are appended LAST. A test that lands on one of them by
+# counting from the bottom would group — and later kill — somebody's session.
+send "g"
+send "j"
+send "K"
+if grep -q '"tmux:ghosty"' "$GJSON" 2>/dev/null; then pass "ghost: session declared into a group"
+else fail "ghost: membership not recorded"; cat "$GJSON" 2>/dev/null; fi
+if grep -q '"dirs"' "$GJSON" 2>/dev/null && grep -q '"tmux:ghosty": "/tmp"' "$GJSON" 2>/dev/null; then
+  pass "ghost: session_path captured while the session lived"
+else fail "ghost: dir not recorded"; cat "$GJSON" 2>/dev/null; fi
+
+# kill it from outside and relaunch: the declaration must survive the process
+send "q"
+sleep 0.5
+tmux $TA kill-session -t =ghosty
+tmux $TA send-keys -t zdriver "$GHOSTRUN" Enter
+sleep 2.5
+if cap | grep -qE "ghosty.*○"; then pass "ghost: dead member renders as a ○ row"
+else fail "ghost: no ghost row after the session died"; cap | head -10; fi
+
+# ↵ summons it back — into the dir the rail recorded, not wherever we are
+send "g"
+send "j"
+send "" Enter
+sleep 1.5
+if tmux $TA has-session -t =ghosty 2>/dev/null; then pass "ghost: ↵ summoned the session back"
+else fail "ghost: ↵ did not start the session"; cap | head -12; fi
+# list-sessions, not display-message: display-message resolves its format
+# against a client, and there is no client on this session — it answers "".
+GDIR=$(tmux $TA list-sessions -F '#{session_name} #{session_path}' 2>/dev/null | awk '$1=="ghosty"{print $2}')
+if [ "$GDIR" = "/tmp" ]; then pass "ghost: summoned into its recorded dir"
+else fail "ghost: summoned into $GDIR, want /tmp"; fi
+if cap | grep -q "\[ghosty\]"; then pass "ghost: viewport attached to the summoned session"
+else fail "ghost: no inner client after the summon"; cap | head -14; fi
+
+# x on a ghost is not a kill — there is nothing left to kill. It forgets the
+# declaration, and says so before it does it.
+send "q"; sleep 0.5
+tmux $TA kill-session -t =ghosty
+tmux $TA send-keys -t zdriver "$GHOSTRUN" Enter
+sleep 2.5
+send "g"
+send "j"
+send "x"
+if cap | grep -q "forget ghosty"; then pass "ghost: x names the real verb (forget, not kill)"
+else fail "ghost: confirm prompt does not say forget"; cap | tail -4; fi
+send "y"
+if cap | grep -q "ghosty"; then fail "ghost: the row survived x"; cap | head -10
+else pass "ghost: x removed the ghost row"; fi
+if grep -q '"tmux:ghosty"' "$GJSON" 2>/dev/null; then
+  fail "ghost: state file still declares the forgotten member"; cat "$GJSON"
+else pass "ghost: declaration pruned from the state file"; fi
+send "q"; sleep 0.5
+
+# --- ghosts on zellij: same declaration, the backend's own honesty ---
+# NOTE: `zellij kill-session` leaves NO resurrectable row on zellij 0.44.3 —
+# it removes the serialized session with the process (probed). So this section
+# exercises the zellij ghost that IS reproducible: a declared member zellij no
+# longer lists at all, summoned back with `attach --create-background`. The
+# EXITED flavour (a session zellij still lists, resurrected by attaching) is
+# covered by unit tests, because no CLI command manufactures one.
+if command -v zellij >/dev/null 2>&1; then
+  ZG=gm-ghost-zj
+  ZSTATE=$(mktemp -d)
+  ZRUN="XDG_STATE_HOME='$ZSTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN"
+  ZJSON="$ZSTATE/ghostmux/groups.json"
+  zellij delete-session "$ZG" --force >/dev/null 2>&1
+  zellij attach --create-background "$ZG" >/dev/null 2>&1
+  sleep 1
+  tmux $TA kill-session -t zdriver 2>/dev/null
+  tmux $TA new-session -d -s zdriver -x 120 -y 32
+  tmux $TA send-keys -t zdriver "$ZRUN" Enter
+  sleep 2.5
+  send "a"
+  tmux $TA send-keys -t zdriver "zfleet"; sleep 0.5
+  send "" Enter
+  # Filter to OUR session first: j only stops on matching rows, so the cursor
+  # cannot land on a zellij session this test did not create.
+  send "/"
+  tmux $TA send-keys -t zdriver "$ZG"; sleep 0.5
+  send "" Enter
+  send "g"
+  send "j"
+  send "K"
+  if grep -q "\"zellij:$ZG\"" "$ZJSON" 2>/dev/null; then
+    pass "ghost/zellij: a zellij session can be declared into a group"
+  else fail "ghost/zellij: membership not recorded"; cat "$ZJSON" 2>/dev/null; fi
+
+  send "q"; sleep 0.5
+  zellij kill-session "$ZG" >/dev/null 2>&1
+  sleep 1
+  tmux $TA send-keys -t zdriver "$ZRUN" Enter
+  sleep 2.5
+  if cap | grep -qE "$ZG.*○"; then pass "ghost/zellij: dead member renders as a ○ row"
+  else fail "ghost/zellij: no ghost row after the session died"; cap | head -10; fi
+
+  send "/"
+  tmux $TA send-keys -t zdriver "$ZG"; sleep 0.5
+  send "" Enter
+  send "g"
+  send "j"
+  send "" Enter
+  sleep 2
+  if zellij list-sessions --no-formatting 2>/dev/null | grep -q "^$ZG "; then
+    pass "ghost/zellij: ↵ summoned the session back onto its own backend"
+  else fail "ghost/zellij: ↵ did not bring the session back"; cap | head -12; fi
+  send "q"; sleep 0.5
+  zellij delete-session "$ZG" --force >/dev/null 2>&1
+else
+  echo "SKIP: zellij not on PATH (ghost section)"
+fi
 
 
 echo

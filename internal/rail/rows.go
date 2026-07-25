@@ -2,6 +2,7 @@ package rail
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
@@ -16,7 +17,15 @@ type railRow struct {
 	isGroup bool   // a user-made folder, not anything the muxes reported
 	isWin   bool   // a window row (vs a session or group row)
 	group   string // name of the group holding this row, "" = ungrouped
-	count   int    // group rows: how many sessions are inside
+	count   int    // group rows: how many live sessions are inside
+
+	// ghost marks a declared name that is not running: either a group member
+	// with no session behind it, or a zellij session zellij itself lists as
+	// EXITED. Both halves are facts — the declaration and the absence — and a
+	// ghost asserts nothing beyond them, which is why it carries no other mark.
+	ghost      bool
+	ghostCount int    // group rows: how many ghosts are inside
+	dir        string // ghost rows: where a summon would start it, "" if unknown
 
 	label     string
 	sess      string
@@ -45,12 +54,74 @@ var agentCmds = map[string]bool{
 	"goose": true, "amp": true, "oa": true, "sol": true, "pi": true,
 }
 
+// builtinAgentCmds records which names shipped with ghostmux, so the settings
+// pane can show them as un-removable: the user's list is additive, and a
+// built-in the user cannot delete must look different from one they added.
+var builtinAgentCmds = func() map[string]bool {
+	out := make(map[string]bool, len(agentCmds))
+	for k := range agentCmds {
+		out[k] = true
+	}
+	return out
+}()
+
 // isAgentCmd reports whether a foreground command is a recognized agent.
 func isAgentCmd(cmd string) bool { return agentCmds[cmd] }
+
+// AddAgentCmds merges user-declared agent commands into the detection set.
+// Lowercased and deduped, because pane_current_command is what it is compared
+// against and that is what tmux reports.
+func AddAgentCmds(cmds []string) {
+	for _, c := range cmds {
+		if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
+			agentCmds[c] = true
+		}
+	}
+}
+
+// BuiltinAgentCmds and ExtraAgentCmds split the detection set for display:
+// what ghostmux knows on its own, and what this user added. Both sorted, so
+// the pane does not reshuffle between renders.
+func BuiltinAgentCmds() []string { return sortedKeys(builtinAgentCmds) }
+
+// ExtraAgentCmds is everything AddAgentCmds contributed.
+func ExtraAgentCmds() []string {
+	out := map[string]bool{}
+	for k := range agentCmds {
+		if !builtinAgentCmds[k] {
+			out[k] = true
+		}
+	}
+	return sortedKeys(out)
+}
+
+// RemoveAgentCmd drops a user-added command. A built-in is never removed:
+// ghostmux would then be claiming it cannot see something it plainly can.
+func RemoveAgentCmd(cmd string) {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if cmd != "" && !builtinAgentCmds[cmd] {
+		delete(agentCmds, cmd)
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // gutter returns up to two attention glyphs, highest priority first:
 // ● bell > ✓ done > ~ activity > ▸ in-viewport.
 func (r railRow) gutter() string {
+	// A ghost's whole story is "declared, not running". ○ says it, and nothing
+	// else may be said: every other glyph reports something a live session is
+	// doing, and there is no process here to be doing it.
+	if r.ghost {
+		return "○"
+	}
 	var g []rune
 	if r.bell {
 		g = append(g, '●')
@@ -101,6 +172,9 @@ func (r railRow) marks() string {
 		win = r.window
 	}
 	var flags []string
+	if r.ghost {
+		flags = append(flags, "ghost")
+	}
 	if r.bell {
 		flags = append(flags, "bell")
 	}

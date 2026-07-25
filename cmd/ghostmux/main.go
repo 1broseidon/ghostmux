@@ -76,7 +76,10 @@ The panel holds no state: quit it, relaunch it anywhere, and it rebuilds the
 same cockpit from what the multiplexers report. Sessions are never yours to
 lose — ghostmux only ever draws them.
 
-Keys: press ? in the panel. The rail ⇄ viewport toggle is ctrl+\ or F12; two
+Keys: press ? in the panel for the keymap overlay (any key closes it), and ,
+for settings — keys, rail width, agent detection, backends, state, about. Both
+are the frame's own keys, so neither is taken from the program you are viewing.
+The rail ⇄ viewport toggle is ctrl+\ or F12; two
 keys because a desktop environment can grab a chord before the terminal sees
 it, and a dead toggle reports no error. Override with GHOSTMUX_TOGGLE (a
 comma-separated list). ? always shows the key that is actually bound.

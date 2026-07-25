@@ -23,13 +23,10 @@ const (
 )
 
 var (
-	styTitleAccent = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleAccent))
-	styTitleName   = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleName)).Bold(true)
-	styTitleTail   = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleTail))
-	styHint        = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleTail))
-	styBell        = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell)).Bold(true)
-	styError       = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell))
-	styActivity    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexActivity))
+	styHint     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleTail))
+	styBell     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell)).Bold(true)
+	styError    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell))
+	styActivity = lipgloss.NewStyle().Foreground(lipgloss.Color(hexActivity))
 )
 
 // treeTop is the screen line the tree's first row is drawn on. There is no
@@ -76,10 +73,6 @@ func (m railModel) View() string {
 	}
 	treeHeight := m.treeHeight()
 
-	if m.helpView {
-		return helpPage(height)
-	}
-
 	var b strings.Builder
 
 	vis := m.visible()
@@ -113,28 +106,6 @@ func (m railModel) attention() (int, int) {
 	return nBell, nDone
 }
 
-// attentionText renders the summary as styled text plus its display width, or
-// ("", 0) when the fleet is quiet — nothing to report means nothing drawn.
-func (m railModel) attentionText() (string, int) {
-	nBell, nDone := m.attention()
-	out, w := "", 0
-	if nBell > 0 {
-		s := "●" + itoa(nBell)
-		out += styBell.Render(s)
-		w += len([]rune(s))
-	}
-	if nDone > 0 {
-		s := "✓" + itoa(nDone)
-		if out != "" {
-			out += " "
-			w++
-		}
-		out += rowStyle(hexAttached, false, false).Render(s)
-		w += len([]rune(s))
-	}
-	return out, w
-}
-
 // hintLine renders the bottom row, which becomes a live prompt in filter,
 // create, and kill-confirm modes, or an error flash after a failed action.
 func (m railModel) hintLine() string {
@@ -148,13 +119,12 @@ func (m railModel) hintLine() string {
 	case modeGroup:
 		return " " + styHint.Render("group: ") + m.input.View()
 	case modeKillConfirm:
-		// Deleting a group is not killing anything: say so, or the confirm
-		// prompt reads like it is about to destroy sessions.
-		verb := "kill "
-		if m.killGroup {
-			verb = "ungroup "
-		}
-		return " " + styHint.Render(verb+m.killTarget+"? ") + styBell.Render("y") + styHint.Render("/n")
+		// One key, four destructions: say which one. Ungrouping is not killing,
+		// forgetting a declaration is not killing, and deleting a serialized
+		// session is not killing either — a prompt that said "kill" for all of
+		// them would be asking consent for something that isn't happening.
+		return " " + styHint.Render(m.killKind.verb()+" "+m.killTarget+"? ") +
+			styBell.Render("y") + styHint.Render("/n")
 	}
 	if m.errorActive() {
 		return " " + styError.Render(m.errMsg)
@@ -162,9 +132,32 @@ func (m railModel) hintLine() string {
 	if m.viewportDead {
 		return " " + styHint.Render("↵ re-point viewport")
 	}
+	// A ghost is the one row whose keys mean something different, and it is
+	// also the row where guessing is expensive — ↵ is about to CREATE
+	// something. Spend the last line saying where, and what x would take away.
+	if vis := m.visible(); m.cursor >= 0 && m.cursor < len(vis) && vis[m.cursor].ghost {
+		return " " + styHint.Render(truncateLabel(ghostHint(vis[m.cursor]), railWidth-1))
+	}
 	// The frame draws the keymap and the attention summary in its bottom bar;
 	// duplicating them here would spend the rail's last row on nothing.
 	return ""
+}
+
+// ghostHint is the ghost row's hint text: what ↵ and x will really do to THIS
+// ghost. The two backends get different words because they do different things
+// — tmux starts a new session, zellij resurrects its own serialized one.
+func ghostHint(r railRow) string {
+	if r.backend != "" {
+		return "↵ resurrect · x delete"
+	}
+	const head, tail = "↵ start in ", " · x forget"
+	// The dir is what gets shortened, never the verbs: a hint that truncates
+	// "forget" into "for" is worse than one that doesn't say where.
+	room := railWidth - 1 - len([]rune(head)) - len([]rune(tail))
+	if r.dir == "" || room < 3 {
+		return "↵ start · x forget"
+	}
+	return head + truncateLeft(r.dir, room) + tail
 }
 
 // emptyStateBody renders the mockup screen-4 rail body when the tree is
@@ -247,7 +240,12 @@ func itoa(n int) string {
 // marks (never truncated). Filter-dimmed rows render entirely in #504945
 // (marks too), in place — no reflow.
 func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) string {
-	dim := filterQuery != "" && !matchesFilter(r, filterQuery)
+	// A ghost is dim for the same reason a filtered-out row is: it is present
+	// but not what is happening. It reuses the filter's dim rather than
+	// inventing a colour, because the rail's palette is fixed and a fourth
+	// shade of grey would say nothing the position and the ○ don't already.
+	dim := r.ghost || (filterQuery != "" && !matchesFilter(r, filterQuery))
+	dimHex := ghostDimHex(r.ghost, cursor)
 
 	// Three levels in 30 columns: a group folder, its sessions, their windows.
 	// Indents stay tight (1/3/5) because every column spent here is a column
@@ -285,9 +283,16 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 
 	suffix := ""
 	// A folded group must still report what it holds, or folding would hide
-	// exactly what the rail exists to surface.
-	if r.isGroup && r.collapsed && r.count > 0 {
-		suffix = " " + itoa(r.count)
+	// exactly what the rail exists to surface. Live and dead are counted
+	// apart — "2 ○1" is a different fleet from "3", and a folder that rounds
+	// them together is lying about what pressing S would do.
+	if r.isGroup && r.collapsed {
+		if r.count > 0 {
+			suffix = " " + itoa(r.count)
+		}
+		if r.ghostCount > 0 {
+			suffix += " ○" + itoa(r.ghostCount)
+		}
 	}
 	if !r.isGroup && !r.isWin && r.attached {
 		suffix = " ●"
@@ -310,6 +315,18 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		}
 	}
 
+	// A declaration ghost spends the same slot on the dir it would be summoned
+	// into. Seeing where the session will be created BEFORE pressing ↵ is what
+	// separates a promise from a surprise; the tail is kept because the head is
+	// the same ~/Projects on every row.
+	dirStr := ""
+	if r.ghost && cmdStr == "" && r.dir != "" {
+		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
+		if rest >= 3 { // " " + at least 2 chars of path tail
+			dirStr = truncateLeft(r.dir, rest-1)
+		}
+	}
+
 	// Everything left of the marks pads to labelWidth so the marks land
 	// flush right at the rail edge, every row, every time. Widths are
 	// measured on the RAW strings — styling happens after.
@@ -317,12 +334,16 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	if cmdStr != "" {
 		cmdRaw = " · " + cmdStr
 	}
-	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw))
+	dirRaw := ""
+	if dirStr != "" {
+		dirRaw = " " + dirStr
+	}
+	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw)) + len([]rune(dirRaw))
 	pad := strings.Repeat(" ", max0(labelWidth-used))
 
 	dimFg := func(fg string) string {
 		if dim {
-			return hexCursorBg
+			return dimHex
 		}
 		return fg
 	}
@@ -333,7 +354,12 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	nameFg, nameBold := nameStyle(r)
 	if dim {
-		nameFg, nameBold = hexCursorBg, false
+		nameFg, nameBold = dimHex, false
+	}
+	// A group whose every member is a ghost is a declaration, not a fleet: dim
+	// the folder itself so the eye skips it exactly as it skips its rows.
+	if r.isGroup && r.count == 0 && r.ghostCount > 0 {
+		nameFg, nameBold = ghostDimHex(true, cursor), false
 	}
 	nameStyled := rowStyle(nameFg, nameBold, cursor).Render(name)
 	suffixStyled := ""
@@ -351,14 +377,33 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" · ") +
 			rowStyle(dimFg(cmdFg), false, cursor).Render(cmdStr)
 	}
+	dirStyled := ""
+	if dirStr != "" {
+		dirStyled = rowStyle(dimHex, false, cursor).Render(dirRaw)
+	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
 
 	marks := padMarksLeft(r.gutter(), railMarksWidth)
-	marksStyled := renderMarks(marks, dim, blinkPhase, cursor)
+	dimMark := ""
+	if dim {
+		dimMark = dimHex
+	}
+	marksStyled := renderMarks(marks, dimMark, blinkPhase, cursor)
 
 	indentStyled := rowStyle(hexTitleTail, false, cursor).Render(indent)
 
-	return indentStyled + arrowStyled + nameStyled + suffixStyled + cmdStyled + padStyled + marksStyled
+	return indentStyled + arrowStyled + nameStyled + suffixStyled + cmdStyled + dirStyled + padStyled + marksStyled
+}
+
+// ghostDimHex is the dim a ghost renders in: the filter's #504945 — except on
+// the cursor bar, whose BACKGROUND is #504945, where the row would vanish
+// entirely. Filter-dimmed rows never hit this (the cursor skips them); a ghost
+// is a row you select on purpose, so it has to survive being selected.
+func ghostDimHex(ghost, cursor bool) string {
+	if ghost && cursor {
+		return hexTitleTail
+	}
+	return hexCursorBg
 }
 
 func max0(n int) int {
@@ -393,17 +438,26 @@ func padMarksLeft(s string, width int) string {
 }
 
 // renderMarks colors each gutter glyph individually (bell blinks and hides on
-// blinkPhase==2; dim overrides every glyph to #504945 under an active,
-// non-matching filter).
-func renderMarks(padded string, dim bool, blinkPhase int, cursor bool) string {
+// blinkPhase==2). dimHex is "" for a normal row, or the colour every glyph is
+// overridden to on a dimmed one — a filtered-out row or a ghost.
+func renderMarks(padded string, dimHex string, blinkPhase int, cursor bool) string {
+	dim := dimHex != ""
 	var b strings.Builder
 	for _, ch := range padded {
 		switch ch {
 		case ' ':
 			b.WriteString(rowStyle(hexSessionName, false, cursor).Render(" "))
+		case '○':
+			// The ghost glyph is never anything but dim: it reports an absence,
+			// and an absence must not compete with a live session's marks.
+			fg := dimHex
+			if fg == "" {
+				fg = hexCursorBg
+			}
+			b.WriteString(rowStyle(fg, false, cursor).Render("○"))
 		case '●':
 			if dim {
-				b.WriteString(rowStyle(hexCursorBg, false, cursor).Render("●"))
+				b.WriteString(rowStyle(dimHex, false, cursor).Render("●"))
 			} else if blinkPhase == 2 {
 				b.WriteString(rowStyle(hexSessionName, false, cursor).Render(" "))
 			} else {
@@ -412,19 +466,19 @@ func renderMarks(padded string, dim bool, blinkPhase int, cursor bool) string {
 		case '✓':
 			fg := hexAttached
 			if dim {
-				fg = hexCursorBg
+				fg = dimHex
 			}
 			b.WriteString(rowStyle(fg, false, cursor).Render("✓"))
 		case '~':
 			fg := hexActivity
 			if dim {
-				fg = hexCursorBg
+				fg = dimHex
 			}
 			b.WriteString(rowStyle(fg, false, cursor).Render("~"))
 		case '▸':
 			fg := hexTitleAccent
 			if dim {
-				fg = hexCursorBg
+				fg = dimHex
 			}
 			b.WriteString(rowStyle(fg, false, cursor).Render("▸"))
 		default:

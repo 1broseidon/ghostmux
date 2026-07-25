@@ -17,7 +17,7 @@ func winRow(sess, idx string) railRow {
 // every existing user pays for a feature they haven't asked for.
 func TestNoGroupsIsExactlyTheOldRail(t *testing.T) {
 	in := []railRow{sessionRow("a"), winRow("a", "1"), sessionRow("b")}
-	out := applyGroups(in, nil)
+	out := applyGroups(in, nil, nil)
 	if len(out) != len(in) {
 		t.Fatalf("applyGroups with no groups changed the tree: %d rows, want %d", len(out), len(in))
 	}
@@ -35,7 +35,7 @@ func TestApplyGroupsNestsMembersAndKeepsStrays(t *testing.T) {
 		sessionRow("api"), winRow("api", "1"),
 		sessionRow("stray"),
 	}
-	out := applyGroups(in, []Group{{Name: "work", Members: []string{"tmux:api"}}})
+	out := applyGroups(in, []Group{{Name: "work", Members: []string{"tmux:api"}}}, nil)
 
 	if !out[0].isGroup || out[0].label != "work" {
 		t.Fatalf("first row should be the group folder: %+v", out[0])
@@ -60,7 +60,7 @@ func TestGroupAggregatesMarksForFolding(t *testing.T) {
 	loud := sessionRow("api")
 	loud.bell = true
 	out := applyGroups([]railRow{loud, quiet},
-		[]Group{{Name: "work", Members: []string{"tmux:api", "tmux:web"}}})
+		[]Group{{Name: "work", Members: []string{"tmux:api", "tmux:web"}}}, nil)
 
 	if !out[0].bell {
 		t.Errorf("group folder did not inherit its member's bell: %+v", out[0])
@@ -74,7 +74,7 @@ func TestGroupAggregatesMarksForFolding(t *testing.T) {
 func TestFoldedGroupHidesEverythingInside(t *testing.T) {
 	rows := applyGroups(
 		[]railRow{sessionRow("api"), winRow("api", "1"), sessionRow("stray")},
-		[]Group{{Name: "work", Members: []string{"tmux:api"}}})
+		[]Group{{Name: "work", Members: []string{"tmux:api"}}}, nil)
 
 	vis := visibleRows(rows, map[string]bool{groupKey("work"): true})
 	for _, r := range vis {
@@ -96,7 +96,7 @@ func TestGroupAndSessionOfSameNameFoldIndependently(t *testing.T) {
 	}
 	rows := applyGroups(
 		[]railRow{sessionRow("api"), winRow("api", "1")},
-		[]Group{{Name: "api", Members: nil}})
+		[]Group{{Name: "api", Members: nil}}, nil)
 	vis := visibleRows(rows, map[string]bool{groupKey("api"): true})
 	found := false
 	for _, r := range vis {
@@ -179,10 +179,10 @@ func TestCursorFollowsTheMovedRow(t *testing.T) {
 func TestGroupsRoundTripOnDisk(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	want := []Group{{Name: "work", Members: []string{"tmux:api", "zellij:myz"}}}
-	if err := saveState(want, nil); err != nil {
+	if err := saveState(want, nil, nil); err != nil {
 		t.Fatalf("saveState: %v", err)
 	}
-	got, _ := loadState()
+	got, _, _ := loadState()
 	if len(got) != 1 || got[0].Name != "work" || len(got[0].Members) != 2 ||
 		got[0].Members[1] != "zellij:myz" {
 		t.Errorf("round trip lost data: %+v", got)
@@ -205,7 +205,7 @@ func TestCorruptStateFileDegradesToNoGroups(t *testing.T) {
 	if err := os.WriteFile(dir+"/ghostmux/groups.json", []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := loadState(); got != nil {
+	if got, _, _ := loadState(); got != nil {
 		t.Errorf("corrupt file yielded %+v, want no groups", got)
 	}
 }
@@ -258,6 +258,9 @@ func TestCreateGroupRejectsBlankAndDuplicate(t *testing.T) {
 // existed because the keyboard path knew about groups and the mouse path did
 // not.
 func TestActivatingAGroupFoldsItFromKeyboardAndMouse(t *testing.T) {
+	// toggleFold persists — without this the test writes the REAL state file
+	// and silently replaces the developer's own groups.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
 		"list-sessions": "api\t0\n",
 		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\n",
@@ -338,7 +341,7 @@ func TestFoldStateSurvivesRestart(t *testing.T) {
 
 	// and unfolding must persist too, not just folding
 	again.toggleFold(vis[0])
-	if _, collapsed := loadState(); collapsed[groupKey("dev")] {
+	if _, collapsed, _ := loadState(); collapsed[groupKey("dev")] {
 		t.Errorf("unfold was not persisted")
 	}
 }
@@ -347,7 +350,7 @@ func TestFoldStateSurvivesRestart(t *testing.T) {
 // absent means open, and the list is sorted so runs produce no spurious diffs.
 func TestOnlyFoldedKeysAreWritten(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := saveState(nil, map[string]bool{"b": true, "a": true, "open": false}); err != nil {
+	if err := saveState(nil, map[string]bool{"b": true, "a": true, "open": false}, nil); err != nil {
 		t.Fatalf("saveState: %v", err)
 	}
 	b, err := os.ReadFile(groupsPath())

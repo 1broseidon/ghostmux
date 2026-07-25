@@ -56,25 +56,52 @@ type soloModel struct {
 	w, h        int
 	toggles     map[string]bool
 	toggleLabel string // the first accepted toggle, as shown in the bottom bar
+
+	// The frame owns two pieces of chrome the rail cannot: a floating help
+	// overlay and a settings mode. Both are keyed here and nowhere else — one
+	// behavior, one place — so no second interception can drift out of sync
+	// with this one.
+	overlayHelp bool
+	settings    *settingsModel // nil = not in settings mode
 }
 
-// toggleKeys resolves the accepted toggle keys: GHOSTMUX_TOGGLE as a
-// comma-separated list, else the defaults. An env value of only separators
-// falls back rather than leaving the frame with no way out of the viewport.
+// toggleKeys resolves the accepted toggle keys in three layers: defaults, then
+// the state file, then GHOSTMUX_TOGGLE (a comma-separated list). Env last
+// because it is the layer a user reaches for when the panel is already broken
+// — a grabbed chord, a strange terminal — and a stored setting must not be
+// able to override the escape hatch. An env value of only separators falls
+// back rather than leaving the frame with no way out of the viewport.
 func toggleKeys() []string {
-	var keys []string
+	keys := defaultToggles
+	if saved := rail.LoadSettings().Toggle; len(saved) > 0 {
+		keys = saved
+	}
+	var env []string
 	for _, k := range strings.Split(os.Getenv("GHOSTMUX_TOGGLE"), ",") {
 		if k = strings.TrimSpace(k); k != "" {
-			keys = append(keys, k)
+			env = append(env, k)
 		}
 	}
-	if len(keys) == 0 {
-		return defaultToggles
+	if len(env) > 0 {
+		return env
 	}
 	return keys
 }
 
+// toggleEnvLocked reports whether GHOSTMUX_TOGGLE is deciding the binding. The
+// settings pane asks, because a field the user cannot change has to say why
+// rather than accept an edit and discard it.
+func toggleEnvLocked() bool {
+	for _, k := range strings.Split(os.Getenv("GHOSTMUX_TOGGLE"), ",") {
+		if strings.TrimSpace(k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func newSolo(vp *ptyViewport) soloModel {
+	applySettings(rail.LoadSettings())
 	keys := toggleKeys()
 	set := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -92,6 +119,17 @@ func newSolo(vp *ptyViewport) soloModel {
 		r = r.InHost(backend, sess)
 	}
 	return soloModel{rail: r, vp: vp, focus: focusRail, toggles: set, toggleLabel: keys[0]}
+}
+
+// applySettings pushes the stored settings into the packages that own the
+// behaviour. Called at boot and again after every edit, so "saved" and
+// "applied" are the same code path — a setting that only takes effect on the
+// next launch is a setting the user has to be told about.
+func applySettings(s rail.Settings) {
+	if s.RailWidth != 0 {
+		rail.SetWidth(s.RailWidth)
+	}
+	rail.AddAgentCmds(s.Agents)
 }
 
 // hostSession identifies the multiplexer session this frame is running inside,
@@ -114,10 +152,7 @@ func (m soloModel) Init() tea.Cmd { return m.rail.Init() }
 func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.w, m.h = msg.Width, msg.Height
-		vw, bodyH := m.viewportSize()
-		m.vp.w.Resize(vw, bodyH)
-		return m.updateRail(tea.WindowSizeMsg{Width: rail.Width, Height: bodyH})
+		return m.resize(msg.Width, msg.Height)
 
 	case term.OutputMsg:
 		return m, nil // View() re-reads the emulator
@@ -128,6 +163,31 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// The frame's own chrome comes first, and this is the ONLY place it is
+		// keyed. While the overlay is up any key dismisses it — including a
+		// toggle key, which closes and does NOT also flip focus, because a key
+		// that did two things at once would be one the user cannot use to mean
+		// either. While settings is open, keys are its own and the toggle is
+		// inert: there is no viewport on screen to hand the keyboard to.
+		if m.overlayHelp {
+			return m.closeOverlay(), nil
+		}
+		if m.settings != nil {
+			return m.updateSettingsKey(msg)
+		}
+		// `?` and `,` are only the frame's while the rail has focus and is not
+		// mid-prompt. Typing a filter, a name, or answering y/n, they are just
+		// characters — a reserved key that silently eats one is the worst
+		// failure a keymap can have.
+		if !msg.Paste && m.focus == focusRail && !m.rail.InPrompt() {
+			switch msg.String() {
+			case "?":
+				m.overlayHelp = true
+				return m, nil
+			case ",":
+				return m.openSettings(), nil
+			}
+		}
 		if !msg.Paste && m.toggles[msg.String()] {
 			return m.setFocus(1 - m.focus), nil
 		}
@@ -153,19 +213,28 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // the rail has focus should hit the viewport, and vice versa. A press inside
 // the viewport also moves focus there, which is what a click means.
 func (m soloModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.X < rail.Width {
+	if m.overlayHelp {
+		if msg.Action == tea.MouseActionPress {
+			return m.closeOverlay(), nil
+		}
+		return m, nil
+	}
+	if m.settings != nil {
+		return m, nil // the rail is not on screen: a click has nothing to hit
+	}
+	if msg.X < rail.Width() {
 		if msg.Action == tea.MouseActionPress && m.focus != focusRail {
 			m = m.setFocus(focusRail)
 		}
 		return m.updateRail(msg)
 	}
-	if msg.X < rail.Width+dividerCol {
+	if msg.X < rail.Width()+dividerCol {
 		return m, nil // the divider swallows its own column
 	}
 	if msg.Action == tea.MouseActionPress && m.focus != focusViewport {
 		m = m.setFocus(focusViewport)
 	}
-	m.vp.w.SendMouse(msg, rail.Width+dividerCol, 0)
+	m.vp.w.SendMouse(msg, rail.Width()+dividerCol, 0)
 	return m, nil
 }
 
@@ -180,6 +249,23 @@ func (m soloModel) updateRail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.setFocus(focusViewport)
 	}
 	return m, cmd
+}
+
+// resize is the whole of "the geometry changed": the terminal resized, or the
+// rail width did. One function, because a width setting that resized the rail
+// but not the child's pty would leave every program in the viewport wrapping
+// at the wrong column.
+func (m soloModel) resize(w, h int) (tea.Model, tea.Cmd) {
+	m.w, m.h = w, h
+	vw, bodyH := m.viewportSize()
+	m.vp.w.Resize(vw, bodyH)
+	return m.updateRail(tea.WindowSizeMsg{Width: rail.Width(), Height: bodyH})
+}
+
+// closeOverlay is the one dismissal path for the help overlay.
+func (m soloModel) closeOverlay() soloModel {
+	m.overlayHelp = false
+	return m
 }
 
 // setFocus moves input focus, telling the widget so its cursor overlay and
@@ -197,7 +283,7 @@ func (m soloModel) setFocus(f int) soloModel {
 // viewportSize is the embedded terminal's cell size: everything right of the
 // divider, above the status row.
 func (m soloModel) viewportSize() (int, int) {
-	vw := m.w - rail.Width - dividerCol
+	vw := m.w - rail.Width() - dividerCol
 	if vw < 1 {
 		vw = 1
 	}
@@ -214,18 +300,28 @@ func (m soloModel) View() string {
 	}
 	vw, bodyH := m.viewportSize()
 
-	railLines := block(m.rail.View(), rail.Width, bodyH)
-	vpLines := block(m.viewportView(vw, bodyH), vw, bodyH)
-	div := m.dividerStyle().Render("│")
-
 	var b strings.Builder
-	for i := range bodyH {
-		b.WriteString(railLines[i])
-		b.WriteString(div)
-		b.WriteString(vpLines[i])
-		b.WriteByte('\n')
+	if m.settings != nil {
+		b.WriteString(m.settingsView(vw, bodyH))
+	} else {
+		railLines := block(m.rail.View(), rail.Width(), bodyH)
+		vpLines := block(m.viewportView(vw, bodyH), vw, bodyH)
+		div := m.dividerStyle().Render("│")
+		for i := range bodyH {
+			b.WriteString(railLines[i])
+			b.WriteString(div)
+			b.WriteString(vpLines[i])
+			b.WriteByte('\n')
+		}
 	}
 	b.WriteString(m.statusLine(m.w))
+
+	// The overlay is composited last, over a finished frame — which is why the
+	// fleet underneath stays live while it is up: nothing about the frame
+	// changed, something was drawn on top of it.
+	if m.overlayHelp {
+		return helpOverlay(b.String(), m.w, m.h)
+	}
 	return b.String()
 }
 
