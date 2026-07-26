@@ -74,29 +74,21 @@ if cap | grep -q "SOLOKEYS"; then
   fail "focus: keys reached the child while the rail had focus"
 else pass "focus: rail-focused keys do not leak to the child"; fi
 
-tmux $TA send-keys -t zdriver 'C-\'; sleep 0.8
+# The default toggle is the single chord ctrl+alt+\ (tmux spells it C-M-\).
+tmux $TA send-keys -t zdriver 'C-M-\'; sleep 0.8
 send "printf 'SOLOKEYS-%s\\n' ok" Enter
-if cap | grep -q "SOLOKEYS-ok"; then pass "focus: ctrl+\\ hands the keyboard to the child"
-else fail "focus: child never saw keys after ctrl+\\"; cap | head -14; fi
-
-tmux $TA send-keys -t zdriver 'C-\'; sleep 0.8
-
-# F12 is the second accepted toggle: a desktop environment that grabs ctrl+\
-# (1Password does, on some Linux setups) must not lock the user in the viewport
-tmux $TA send-keys -t zdriver F12; sleep 0.8
-send "printf 'F12KEYS-%s\\n' ok" Enter
-if cap | grep -q "F12KEYS-ok"; then pass "focus: F12 toggles too (ctrl+\\ is not a single point of failure)"
-else fail "focus: F12 did not hand the keyboard over"; cap | head -14; fi
+if cap | grep -q "SOLOKEYS-ok"; then pass "focus: ctrl+alt+\\ hands the keyboard to the child"
+else fail "focus: child never saw keys after ctrl+alt+\\"; cap | head -14; fi
 
 # back to the rail, and prove `q` is a rail key again (not sent to the child)
-tmux $TA send-keys -t zdriver F12; sleep 0.8
+tmux $TA send-keys -t zdriver 'C-M-\'; sleep 0.8
 
-# the help overlay must name the keys actually bound, or it is worse than
-# nothing — and it must name them WHOLE. In the 30-column rail this row read
+# the help overlay must name the key actually bound, or it is worse than
+# nothing — and it must name it WHOLE. In the 30-column rail this row read
 # "ctrl+\  toggle rail ⇄ vi…", which is exactly the row a user whose desktop
 # grabbed the chord needs intact.
 send "?"
-if cap | grep -q "F12\|f12"; then pass "help: ? reports the real toggle keys"
+if cap | grep -q "alt+ctrl"; then pass "help: ? reports the real toggle key"
 else fail "help: ? does not show the bound toggle"; cap | head -18; fi
 if cap | grep -q "ghostmux · keys"; then pass "help: ? draws the overlay box with its title"
 else fail "help: no overlay title"; cap | head -18; fi

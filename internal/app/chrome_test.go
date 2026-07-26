@@ -162,8 +162,7 @@ func TestAnyKeyClosesOverlayIncludingTheToggle(t *testing.T) {
 	for _, k := range []tea.KeyMsg{
 		key("x"),
 		{Type: tea.KeyEscape},
-		{Type: tea.KeyCtrlBackslash},
-		{Type: tea.KeyF12},
+		{Type: tea.KeyCtrlBackslash, Alt: true},
 	} {
 		m := newChromeSolo(t)
 		m = send(m, key("?"))
@@ -275,7 +274,7 @@ func TestSettingsClosePathsAgree(t *testing.T) {
 func TestToggleIsInertInSettings(t *testing.T) {
 	m := newChromeSolo(t)
 	m = send(m, key(","))
-	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlBackslash})
+	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlBackslash, Alt: true})
 	if m.focus != focusRail {
 		t.Errorf("the toggle flipped focus while settings was open")
 	}

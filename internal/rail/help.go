@@ -16,8 +16,8 @@ type keyHelp struct{ key, desc string }
 // reports what it actually reserved so `?` can never lie about the keymap — a
 // help page that names a dead key is worse than no help page.
 var (
-	toggleLabel = `ctrl+\` // shown in the keymap table (first key)
-	toggleAll   = `ctrl+\` // shown in the footer (every accepted key)
+	toggleLabel = `alt+ctrl+\` // shown in the keymap table (first key)
+	toggleAll   = `alt+ctrl+\` // shown in the footer (every accepted key)
 )
 
 // SetToggleKeys records the key(s) the hosting frame reserved for the

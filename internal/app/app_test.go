@@ -213,7 +213,7 @@ func TestToggleKeySwitchesFocusFromEitherSide(t *testing.T) {
 	if m.focus != focusRail {
 		t.Fatalf("solo should start rail-focused")
 	}
-	toggle := tea.KeyMsg{Type: tea.KeyCtrlBackslash}
+	toggle := tea.KeyMsg{Type: tea.KeyCtrlBackslash, Alt: true}
 	if !m.toggles[toggle.String()] {
 		t.Fatalf("toggle key name drift: %q not in %v", toggle.String(), m.toggles)
 	}
@@ -230,16 +230,15 @@ func TestToggleKeySwitchesFocusFromEitherSide(t *testing.T) {
 	}
 }
 
-// TestEveryDefaultToggleWorksFromEitherSide: the second default exists solely
-// so that a desktop environment grabbing the first (1Password takes ctrl+\ on
-// some Linux setups) is an annoyance rather than a lockout — a user stuck in
-// the viewport has no way back and no error to read.
+// TestEveryDefaultToggleWorksFromEitherSide pins the default chord's
+// bubbletea spelling: the settings pane, the env var, and this list must all
+// agree on "alt+ctrl+\" or a rebind round-trip would not match itself.
 func TestEveryDefaultToggleWorksFromEitherSide(t *testing.T) {
 	orig := tmux.Runner
 	tmux.Runner = func(args ...string) (string, error) { return "", nil }
 	t.Cleanup(func() { tmux.Runner = orig })
 
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyCtrlBackslash}, {Type: tea.KeyF12}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyCtrlBackslash, Alt: true}} {
 		m := newSolo(newTestViewport())
 		if !m.toggles[key.String()] {
 			t.Fatalf("%q is not an accepted default toggle", key.String())

@@ -33,18 +33,19 @@ const (
 	focusViewport
 )
 
-// defaultToggles are the keys the frame reserves for rail ⇄ viewport. More
-// than one, because the failure is silent and unfixable from inside: a
-// desktop environment (1Password, a WM shortcut) can grab a chord before the
-// terminal ever sees it, and then the toggle is simply dead with no error to
-// read. A second accepted key means a grabbed default is an annoyance, not a
-// lockout. GHOSTMUX_TOGGLE replaces the list entirely (comma-separated),
-// matching classic's @ghostmux_toggle in spirit — env, not a config file.
+// defaultToggles is the key the frame reserves for rail ⇄ viewport:
+// ctrl+alt+\ — the three-modifier chord is essentially never claimed by a
+// desktop environment (plain ctrl+\ is: 1Password grabs it on some Linux
+// setups), tmux, zellij, or a TUI, so one clean default suffices. The earlier
+// second key (F12) existed as lockout insurance; that job is now done better
+// by three recovery paths that all work with a dead toggle: the mouse routes
+// by coordinates, `,` opens settings from the rail to rebind by capture, and
+// GHOSTMUX_TOGGLE overrides everything (comma-separated list) — env last,
+// because it is the layer you reach for when the panel is already broken.
 //
-// Every reserved key is one stolen from the program in the viewport, so this
-// list stays short, and stays clear of tmux's ctrl+b and zellij's
-// ctrl+g/p/t/n/h/s/o/q.
-var defaultToggles = []string{`ctrl+\`, "f12"}
+// Every reserved key is one stolen from the program in the viewport, so the
+// default stays a single key.
+var defaultToggles = []string{`alt+ctrl+\`}
 
 // dividerCol is the single column between rail and viewport.
 const dividerCol = 1
