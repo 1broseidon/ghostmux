@@ -1,5 +1,10 @@
 # ghostmux Phase 2 — Implementation Spec
 
+> **Scope note (2026-07-27):** ghostmux is tmux-only. The multi-backend
+> prototype (zellij beside tmux) was cut after the v0.3 panel shipped;
+> references to zellij, aux backends, or `z` in this document are historical
+> and no longer describe the product. ghostmux is the tmux fleet navigator.
+
 **Repo:** `github.com/1broseidon/ghostmux` · baseline `948a9e2` · Go 1.24+ · tmux 3.4 · ghostty 1.3.1 (Linux/GTK)
 **Design contract:** `docs/DESIGN.md` (the six-screen mockup spec). Where this document and the mockup spec disagree on visuals, the mockup spec wins. Where the mockup spec names a mechanism loosely (e.g. "OSC 133"), this document's mechanism wins.
 **Product law (the purist test):** a feature ships only if neither tmux nor ghostty alone could do it. The rail hub passes: it is the coordination surface for a fleet of sessions rendered through nested clients — tmux alone gives you choose-tree (modal, blocking), ghostty alone gives you nothing.
@@ -17,7 +22,7 @@ Each seam gets exactly one mechanism. Justifications are one sentence each; impl
 | **D3. Viewport claiming a neighbor shell** | **`ghostmux hub`** — one idempotent command that creates (or attaches to) a dedicated session named `hub` with the rail+viewport layout built by ghostmux, never by claiming an existing pane. `rail dock` is **removed**. | A dedicated session eliminates the "rail ate my shell" failure class and gives `prefix None` a safe blast radius. `findOrCreateViewport` stays as fallback for bare `ghostmux rail` in arbitrary sessions. |
 | **D4. Hub-in-tree mirror guard** | **Keep**, generalized: exclude the session the rail runs in *by name* (works for `hub` and for manual `rail` runs). | Already validated in the prototype. |
 | **D5. "Agent done" ✓ data source** | **Foreground-command transition tracking**, persisted in tmux user options. The rail polls `#{pane_current_command}` per pane each tick; when a pane transitions from a non-shell command to a shell (`zsh|bash|fish|sh`) while its session is **not** in the viewport and **not** attached elsewhere, set `@ghostmux_done 1` on that window (`tmux set -w -t <target> @ghostmux_done 1`); viewing the window clears it. | tmux 3.4 does not surface OSC 133 to hooks, so real semantic prompt-marking is impossible today; command-exit-to-shell is observable with zero shell integration and is the honest 90% of "the agent finished." Real OSC 133 lands in phase 3 via ghostty 1.4. Storing in `@options` (not rail memory) means ✓ survives rail restarts. |
-| **D6. Refresh cadence** | **Event-driven via hooks + `tmux wait-for`, with the 1s poll kept as fallback and as the command-transition sampler.** Global hooks at reserved index `[133]` (`alert-bell[133]`, `alert-activity[133]`, `session-created[133]`, `session-closed[133]`, `window-linked[133]`, `window-unlinked[133]`, `window-renamed[133]`) each run `run-shell 'tmux wait-for -S ghostmux-refresh'`; a rail goroutine loops `tmux wait-for ghostmux-refresh` and posts a refresh msg. Hooks installed on rail start, unset (index 133 only) on rail exit. | Instant gutter response without control mode; index-scoped hooks can't clobber user hooks; `wait-for` is the tmux-native IPC primitive (no fifos, no polling storms). Control-mode-lite is rejected — it's phase-3's `-CC` library's job and 1.4 may obsolete home-grown parsing. |
+| **D6. Refresh cadence** | **Event-driven via additive hook leases + `tmux wait-for`, with the 1s poll kept as fallback and as the command-transition sampler.** Every panel gets a private versioned channel and appends independent entries to the relevant global session- and window-hook arrays. It discovers tmux-assigned indices and removes only exact canonical commands it still owns. | Instant response without control mode or scalar-option changes; existing user hook entries and concurrent panels remain independent. `wait-for` is the tmux-native IPC primitive, while the fallback refresh handles unsupported hooks, startup without a server, and activity timestamps. |
 | **D7. Bell blink** | **Second timer**: a 400ms `tea.Tick` runs **only while at least one bell mark exists**, advancing a phase counter; bell glyphs render on phases 0–1, hidden on phase 2 (≈800ms on / 400ms off, matching the mockup cadence). Data refresh stays on the 1s tick + events. | Blinking is view-only state; coupling it to the data tick would force 400ms polling of tmux for nothing. |
 | **D8. termtile integration** | **Deferred to phase 3, seam reserved in data only**: the row model keeps `attached` and gains `clientTTY` (`#{client_tty}` of the attached client) so a future `ghostmux which <session>` / termtile call can map session → ghostty window. No X11 code in this repo, ever — focusing windows is termtile's competence, calling ghostmux for the mapping. | Ghostty 1.4's scripting API (~2 months out) will likely provide window focus natively; building EWMH focus now is duplicated effort in the wrong repo. |
 
@@ -148,12 +153,14 @@ func (v *viewport) heal()                       // tick check: pane_dead → poi
 Per D6/D7:
 
 ```go
-func installHooks()   // set-hook -g alert-bell[133] "run-shell 'tmux wait-for -S ghostmux-refresh'" … (7 hooks)
-func removeHooks()    // set-hook -gu alert-bell[133] …
-func waitLoop(p *tea.Program)  // for { tmux wait-for ghostmux-refresh; p.Send(refreshMsg{}) }
+lease, _ := NewHookLease()       // private versioned channel and additive hook entries
+go lease.Listen(ctx, program)    // wait-for signal → refreshMsg; retries server loss
+lease.Close()                    // compare exact commands before removing owned entries
 ```
 
-- The goroutine's blocking `tmux wait-for` process must be killed on quit (context + `cmd.Process.Kill()`).
+- Every panel appends independent entries to tmux's global session- and window-hook arrays. It never selects a fixed index, overwrites an existing entry, or changes `monitor-activity`/`visual-activity`.
+- The goroutine's blocking `tmux wait-for` process is killed by context cancellation. Cleanup removes an entry only while its canonical command still exactly matches the lease.
+- The one-second fleet refresh remains the fallback. Hooks reduce event latency; stable window activity timestamps preserve per-panel activity marks without forcing native tmux monitoring.
 - Blink: `blinkMsg` on a 400ms tick started **only** when a refresh finds ≥1 bell row and no blink timer is running; the timer stops itself (returns nil cmd) when bells clear. Model holds `blinkPhase int` (mod 3).
 
 ---

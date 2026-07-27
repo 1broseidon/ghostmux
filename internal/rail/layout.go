@@ -4,35 +4,112 @@ package rail
 // scroll-window row selection. Kept dependency-free (no lipgloss, no tmux) so
 // they're trivially unit-testable.
 
-// railWidth is the rail's column count: 30 by default (matches
-// `split-window -hbf -l 30`). It is a var, not a const, because the settings
-// pane can change it — and everything that draws a row reads it, so one
-// variable is the whole of "apply a new width".
-var railWidth = 30
+// railWidth is the rail's column count. It is a var because the settings pane
+// can change it, and everything that draws a row reads the same value.
+var railWidth = defaultWidth
 
-// widthMin/widthMax bound it. Below 20 the names stop being readable at all;
-// above 60 the rail stops being a rail and starts being a second pane.
+// Width bounds and default are shared with the frame when it reconciles an
+// adopted settings snapshot.
 const (
-	widthMin = 20
-	widthMax = 60
+	defaultWidth = 30
+	widthMin     = 20
+	widthMax     = 60
 )
 
 // Width is the rail's current column count, for hosting frames: classic
 // enforces it on a tmux pane, solo allocates it in its own layout.
 func Width() int { return railWidth }
 
-// SetWidth applies a user-chosen rail width, clamped, and reports what it
-// actually took. A value outside the bounds is clamped rather than rejected:
-// the settings pane already shows the result, so there is nothing to explain.
-func SetWidth(cols int) int {
+// DefaultWidth returns the width used when no explicit setting is stored.
+func DefaultWidth() int { return defaultWidth }
+
+// ClampWidth returns the supported value without changing live layout.
+func ClampWidth(cols int) int {
 	if cols < widthMin {
-		cols = widthMin
+		return widthMin
 	}
 	if cols > widthMax {
-		cols = widthMax
+		return widthMax
 	}
-	railWidth = cols
+	return cols
+}
+
+// SetWidth applies a clamped user-chosen rail width.
+func SetWidth(cols int) int {
+	railWidth = ClampWidth(cols)
 	return railWidth
+}
+
+// GhostDir values for Settings.GhostDir: which tmux path evidence a ghost
+// remembers when summoned. Empty means launch (the default).
+const (
+	GhostDirLaunch = "launch" // #{session_path}: where the session was created
+	GhostDirLast   = "last"   // active pane #{pane_current_path}
+)
+
+var ghostDirMode = GhostDirLaunch
+
+// SetGhostDir applies the ghost directory memory mode. Unknown values fall
+// back to launch — the historical, SPEC-documented behaviour.
+func SetGhostDir(mode string) {
+	ghostDirMode = NormalizeGhostDir(mode)
+}
+
+// GhostDir returns the live memory mode (never empty: launch or last).
+func GhostDir() string { return ghostDirMode }
+
+// NormalizeGhostDir maps a stored setting to a live mode. Empty and unknown
+// values are launch so old files and cleared settings keep prior behaviour.
+func NormalizeGhostDir(mode string) string {
+	if mode == GhostDirLast {
+		return GhostDirLast
+	}
+	return GhostDirLaunch
+}
+
+// PersistGhostDir is what goes in Settings.GhostDir: empty for the default
+// (launch), otherwise the explicit mode string.
+func PersistGhostDir(mode string) string {
+	if NormalizeGhostDir(mode) == GhostDirLast {
+		return GhostDirLast
+	}
+	return ""
+}
+
+// CreateDir values for Settings.CreateDir: where `n` starts a new tmux
+// session. Empty means home (the default).
+const (
+	CreateDirHome    = "home"    // the operator's home directory
+	CreateDirCurrent = "current" // the viewport session's active pane cwd
+)
+
+var createDirMode = CreateDirHome
+
+// SetCreateDir applies the new-session directory mode. Unknown values fall
+// back to home — the historical behaviour.
+func SetCreateDir(mode string) {
+	createDirMode = NormalizeCreateDir(mode)
+}
+
+// CreateDir returns the live mode (never empty: home or current).
+func CreateDir() string { return createDirMode }
+
+// NormalizeCreateDir maps a stored setting to a live mode. Empty and unknown
+// values are home so old files and cleared settings keep prior behaviour.
+func NormalizeCreateDir(mode string) string {
+	if mode == CreateDirCurrent {
+		return CreateDirCurrent
+	}
+	return CreateDirHome
+}
+
+// PersistCreateDir is what goes in Settings.CreateDir: empty for the default
+// (home), otherwise the explicit mode string.
+func PersistCreateDir(mode string) string {
+	if NormalizeCreateDir(mode) == CreateDirCurrent {
+		return CreateDirCurrent
+	}
+	return ""
 }
 
 // truncateLabel truncates s to at most width runes, replacing the tail with

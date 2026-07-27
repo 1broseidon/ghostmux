@@ -56,7 +56,7 @@ func TestOldStateFileLoadsUnchanged(t *testing.T) {
 	if len(groups) != 1 || !collapsed["grp:work"] || dirs["tmux:api"] != "/srv" {
 		t.Errorf("old-format file did not load: %+v %v %v", groups, collapsed, dirs)
 	}
-	if s := LoadSettings(); !s.empty() {
+	if s := LoadSettings(); !s.Empty() {
 		t.Errorf("a file with no settings key invented some: %+v", s)
 	}
 }
@@ -125,6 +125,48 @@ func TestStateFileReportsTheFileNotTheFleet(t *testing.T) {
 	}
 }
 
+// TestSetGhostDirNormalizesUnknownToLaunch: ghosts default to session_path
+// evidence; only an explicit "last" opts into pane cwd memory.
+func TestSetGhostDirNormalizesUnknownToLaunch(t *testing.T) {
+	orig := GhostDir()
+	t.Cleanup(func() { SetGhostDir(PersistGhostDir(orig)) })
+	for _, c := range []struct{ in, live, persist string }{
+		{"", GhostDirLaunch, ""},
+		{"launch", GhostDirLaunch, ""},
+		{"last", GhostDirLast, GhostDirLast},
+		{"weird", GhostDirLaunch, ""},
+	} {
+		SetGhostDir(c.in)
+		if GhostDir() != c.live {
+			t.Errorf("SetGhostDir(%q) live=%q, want %q", c.in, GhostDir(), c.live)
+		}
+		if PersistGhostDir(c.in) != c.persist {
+			t.Errorf("PersistGhostDir(%q)=%q, want %q", c.in, PersistGhostDir(c.in), c.persist)
+		}
+	}
+}
+
+// TestSetCreateDirNormalizesUnknownToHome: n defaults to home; only an
+// explicit "current" opts into the viewport session's cwd.
+func TestSetCreateDirNormalizesUnknownToHome(t *testing.T) {
+	orig := CreateDir()
+	t.Cleanup(func() { SetCreateDir(PersistCreateDir(orig)) })
+	for _, c := range []struct{ in, live, persist string }{
+		{"", CreateDirHome, ""},
+		{"home", CreateDirHome, ""},
+		{"current", CreateDirCurrent, CreateDirCurrent},
+		{"weird", CreateDirHome, ""},
+	} {
+		SetCreateDir(c.in)
+		if CreateDir() != c.live {
+			t.Errorf("SetCreateDir(%q) live=%q, want %q", c.in, CreateDir(), c.live)
+		}
+		if PersistCreateDir(c.in) != c.persist {
+			t.Errorf("PersistCreateDir(%q)=%q, want %q", c.in, PersistCreateDir(c.in), c.persist)
+		}
+	}
+}
+
 // TestAddAgentCmdsAffectsDetection: an added name is detected exactly like a
 // built-in, because detection is one map and there is no second list.
 func TestAddAgentCmdsAffectsDetection(t *testing.T) {
@@ -155,7 +197,7 @@ func TestAddAgentCmdsAffectsDetection(t *testing.T) {
 // on: a mode missing here would silently eat a character the user typed.
 func TestInPromptCoversEveryPrompt(t *testing.T) {
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "alpha\t0\n",
+		"list-sessions": "alpha\t0\t\t\n",
 		"list-windows":  "alpha\t1\tzsh\t1\t0\t0\t0\n",
 	})
 	m := New(&fakeViewport{})
@@ -201,7 +243,14 @@ func TestHelpEntriesAndToggleFooterAreTheRailsTruth(t *testing.T) {
 	if f := ToggleFooter(); !strings.Contains(f, "f9") || !strings.Contains(f, "ctrl+]") {
 		t.Errorf("footer does not name every accepted key: %q", f)
 	}
-	if HelpEntries()[4].Key != "f9" {
-		t.Errorf("the keymap row does not follow the real binding: %+v", HelpEntries()[4])
+	found := false
+	for _, entry := range HelpEntries() {
+		if entry.Key == "f9" && entry.Desc == "rail ⇄ viewport" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("the keymap does not follow the real binding: %+v", HelpEntries())
 	}
 }

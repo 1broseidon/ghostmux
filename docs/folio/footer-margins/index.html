@@ -1,0 +1,470 @@
+<!-- Folio · slug: footer-margins · kind: explainer · bundle: single-file · host: local -->
+<!-- deps: none · data: mock terminal frames (labeled) · publish: none -->
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ghostmux footer margins · Folio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23d79921'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='14' fill='%231d2021' font-family='monospace'%3Eg%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  --font-display: ui-serif, Georgia, "Iowan Old Style", serif;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Page chrome (document) */
+  --color-paper:    oklch(97% 0.008 85);
+  --color-paper-2:  oklch(94% 0.010 85);
+  --color-rule:     oklch(86% 0.012 85);
+  --color-ink:      oklch(22% 0.018 75);
+  --color-ink-2:    oklch(42% 0.014 75);
+  --color-muted:    oklch(55% 0.012 75);
+  --color-accent:   oklch(62% 0.140 85);
+  --color-accent-ink: oklch(22% 0.02 75);
+  --color-focus:    oklch(62% 0.140 85);
+  --color-pick:     oklch(72% 0.16 145);
+
+  /* Terminal mock (Gruvbox Dark Hard roles → OKLCH) */
+  --term-bg:       oklch(18% 0.012 80);
+  --term-bg-2:     oklch(22% 0.014 80);
+  --term-fg:       oklch(90% 0.025 90);
+  --term-muted:    oklch(58% 0.020 80);
+  --term-dim:      oklch(42% 0.015 75);
+  --term-gold:     oklch(78% 0.130 90);
+  --term-aqua:     oklch(78% 0.090 145);
+  --term-yellow:   oklch(82% 0.130 95);
+  --term-green:    oklch(78% 0.140 125);
+  --term-red:      oklch(68% 0.180 30);
+  --term-leader:   oklch(35% 0.015 75);
+  --term-inner:    oklch(55% 0.110 125); /* olive status — NOT ghostmux */
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px;
+  --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+  --shadow-sm: 0 8px 28px oklch(20% 0.02 80 / 0.35);
+  --page-max: 1100px;
+  --measure: 62ch;
+  --border-thin: 1px;
+  --type--1: 0.875rem;
+  --type-0: 1rem;
+  --type-1: 1.35rem;
+  --type-2: 2rem;
+  --leading-body: 1.55;
+  --leading-tight: 1.15;
+  --cell: 13px;
+  --cell-h: 17px;
+}
+
+[data-theme="light"] {
+  --color-paper:    oklch(97% 0.008 85);
+  --color-paper-2:  oklch(94% 0.010 85);
+  --color-rule:     oklch(86% 0.012 85);
+  --color-ink:      oklch(22% 0.018 75);
+  --color-ink-2:    oklch(42% 0.014 75);
+  --color-muted:    oklch(55% 0.012 75);
+}
+
+[data-theme="dark"] {
+  --color-paper:    oklch(16% 0.010 80);
+  --color-paper-2:  oklch(20% 0.012 80);
+  --color-rule:     oklch(30% 0.014 80);
+  --color-ink:      oklch(95% 0.008 90);
+  --color-ink-2:    oklch(78% 0.012 85);
+  --color-muted:    oklch(65% 0.012 80);
+  --color-accent:   oklch(78% 0.130 90);
+  --color-accent-ink: oklch(18% 0.02 80);
+  --color-focus:    oklch(78% 0.130 90);
+  --color-pick:     oklch(78% 0.140 145);
+}
+
+* { box-sizing: border-box; }
+html, body { overflow-x: clip; }
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: var(--type-0);
+  line-height: var(--leading-body);
+}
+main {
+  width: min(var(--page-max), calc(100% - var(--space-6)));
+  margin: var(--space-6) auto var(--space-7);
+}
+h1, h2, h3 { font-style: normal; font-family: var(--font-display); line-height: var(--leading-tight); }
+h1 { margin: 0 0 var(--space-3); font-size: var(--type-2); font-weight: 700; }
+h2 { margin: 0 0 var(--space-2); font-size: var(--type-1); font-weight: 700; }
+p, li { max-width: var(--measure); }
+.lede { color: var(--color-ink-2); margin: 0 0 var(--space-5); max-width: 70ch; }
+.note {
+  border-left: 3px solid var(--color-accent);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-paper-2);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--color-ink-2);
+  margin: 0 0 var(--space-6);
+  max-width: 72ch;
+}
+.note strong { color: var(--color-ink); font-weight: 700; }
+
+.theme-toggle {
+  position: fixed; top: var(--space-4); right: var(--space-4);
+  border: var(--border-thin) solid var(--color-rule);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-paper-2); color: var(--color-ink); font: inherit;
+  cursor: pointer; z-index: 5;
+}
+.theme-toggle:focus-visible { outline: var(--border-thin) solid var(--color-focus); outline-offset: var(--space-1); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-5);
+}
+.card {
+  background: var(--color-paper-2);
+  border: var(--border-thin) solid var(--color-rule);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+.card.picked {
+  border-color: var(--color-pick);
+  box-shadow: 0 0 0 1px var(--color-pick);
+}
+.card header {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3);
+}
+.card .tag {
+  font-family: var(--font-mono);
+  font-size: var(--type--1);
+  color: var(--color-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.card h2 { margin: 0; font-size: 1.15rem; }
+.card .why { margin: 0; color: var(--color-ink-2); font-size: var(--type--1); max-width: none; }
+.pick {
+  justify-self: start;
+  border: var(--border-thin) solid var(--color-rule);
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--type--1);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.pick[aria-pressed="true"] {
+  background: var(--color-pick);
+  color: var(--color-accent-ink);
+  border-color: var(--color-pick);
+  font-weight: 700;
+}
+
+/* Terminal frame */
+.term {
+  font-family: var(--font-mono);
+  font-size: var(--cell);
+  line-height: var(--cell-h);
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border-radius: var(--radius-md);
+  border: 1px solid oklch(30% 0.015 75);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  user-select: none;
+}
+.term-body {
+  padding: var(--space-2) var(--space-3) 0;
+  min-height: calc(var(--cell-h) * 6);
+  color: var(--term-muted);
+}
+.term-body .live { color: var(--term-fg); }
+.term-body .dim { color: var(--term-dim); }
+.term-body .aqua { color: var(--term-aqua); font-weight: 700; }
+.term-body .gold { color: var(--term-gold); font-weight: 700; }
+
+/* Inner session status — deliberately NOT ghostmux */
+.inner-status {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  background: var(--term-inner);
+  color: oklch(18% 0.02 80);
+  padding: 0 var(--space-2);
+  font-weight: 700;
+  margin-top: var(--space-2);
+}
+.inner-status .right {
+  color: oklch(92% 0.04 95);
+  font-weight: 500;
+}
+.inner-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--term-inner);
+  padding: 2px var(--space-3) 0;
+  background: var(--term-bg);
+}
+
+/* ghostmux caption variants */
+.gmx {
+  background: var(--term-bg);
+  color: var(--term-muted);
+  white-space: pre;
+  overflow: hidden;
+}
+.gmx .spine { color: var(--term-gold); font-weight: 700; }
+.gmx .key { color: var(--term-yellow); }
+.gmx .done { color: var(--term-green); }
+.gmx .host { color: var(--term-dim); }
+.gmx .leader { color: var(--term-leader); }
+
+.gmx-a { padding: 0; } /* flush today */
+.gmx-b { border-top: 1px solid var(--term-leader); padding: 0; }
+.gmx-c { border-top: 1px solid var(--term-leader); padding: 4px 0 0; }
+.gmx-d { border-top: 1px solid var(--term-leader); padding: 4px 0 4px; }
+.gmx-e {
+  border-top: 1px solid var(--term-leader);
+  padding: 4px 10px 4px;
+}
+.gmx-f {
+  margin: 0 8px 6px;
+  border-top: 1px dotted var(--term-leader);
+  padding: 4px 0 0;
+}
+
+.verdict {
+  margin-top: var(--space-6);
+  padding: var(--space-5);
+  border: var(--border-thin) solid var(--color-rule);
+  border-radius: var(--radius-lg);
+  background: var(--color-paper-2);
+}
+.verdict h2 { margin-bottom: var(--space-3); }
+.verdict ol { margin: 0; padding-left: 1.2em; color: var(--color-ink-2); }
+.verdict li { margin-bottom: var(--space-2); max-width: none; }
+#choice {
+  font-family: var(--font-mono);
+  color: var(--color-pick);
+  font-weight: 700;
+}
+</style>
+</head>
+<body>
+<button class="theme-toggle" type="button" aria-pressed="true">Theme</button>
+<main>
+  <h1>ghostmux footer · margins</h1>
+  <p class="lede">
+    Design review for the panel caption under nested session chrome.
+    Pick a candidate — the goal is quiet separation without turning the footer into another status strip.
+  </p>
+
+  <p class="note">
+    <strong>Read the stack correctly.</strong>
+    The olive bar (<code>[gm-agent-1:agent*]</code> + clock) is the <em>inner</em> session/agent statusline — not ghostmux.
+    Ghostmux owns only the thin caption under it (<code>▎gmx</code> · keys · <code>✓N</code> · <code>@host</code>).
+    These options only change that caption.
+  </p>
+
+  <div class="grid" id="options">
+
+    <article class="card" data-id="A">
+      <header>
+        <div>
+          <div class="tag">A · today</div>
+          <h2>Flush caption</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">No rule, no padding. Reads glued to the olive strip above — the complaint in the screenshot.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-a"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+    <article class="card" data-id="B">
+      <header>
+        <div>
+          <div class="tag">B · rule</div>
+          <h2>Hairline only</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">One solid hairline on panel ground. Separates objects; still zero vertical margin. Cheapest fix.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-b"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+    <article class="card" data-id="C">
+      <header>
+        <div>
+          <div class="tag">C · rule + top pad</div>
+          <h2>Breathing room above</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">Hairline plus ~4px (~¼ cell) above the caption text. Footer text clearly “below the border.” Costs almost no rows.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-c"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+    <article class="card" data-id="D">
+      <header>
+        <div>
+          <div class="tag">D · padded band</div>
+          <h2>Pad above and below</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">Symmetric vertical padding. Feels like a designed footer band — risk: starts to look like a second status strip.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-d"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+    <article class="card" data-id="E">
+      <header>
+        <div>
+          <div class="tag">E · inset</div>
+          <h2>Side margins + rule</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">Hairline + top pad + horizontal inset. Caption no longer fights the full-bleed olive bar; more “typeset,” slightly less cockpit.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-e"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+    <article class="card" data-id="F">
+      <header>
+        <div>
+          <div class="tag">F · dotted float</div>
+          <h2>Floating dotted rule</h2>
+        </div>
+        <button class="pick" type="button" aria-pressed="false">Pick</button>
+      </header>
+      <p class="why">Keeps the engraved-caption grammar (dotted texture) but lifts the whole footer off the edges. Softest separation from the olive strip.</p>
+      <div class="term" aria-hidden="true">
+        <div class="term-body">
+          <div><span class="dim">  ▾ agents</span></div>
+          <div><span class="gold">▎</span><span class="aqua">gm-agent-00</span><span class="dim">              ▸</span></div>
+          <div class="dim">  ▾ tools</div>
+          <div class="live">…</div>
+        </div>
+        <div class="inner-label">inner session chrome ↓</div>
+        <div class="inner-status"><span>[gm-agent-1:agent*]</span><span class="right">Ghostmux Info Search  11:51</span></div>
+        <div class="gmx gmx-f"><span class="spine">▎gmx</span>  <span class="key">alt+ctrl+\</span> back to rail <span class="leader">┈┈┈┈┈┈</span> <span class="done">✓1</span>  <span class="host">@beastie-linux </span></div>
+      </div>
+    </article>
+
+  </div>
+
+  <section class="verdict">
+    <h2>Working recommendation</h2>
+    <p class="lede" style="margin-bottom: var(--space-3)">Your pick: <span id="choice">none yet</span></p>
+    <ol>
+      <li><strong>Prefer C</strong> if you want “text below a border” without spending a full row: solid hairline + small top pad on panel ground.</li>
+      <li><strong>Prefer F</strong> if you want to keep the dotted engraved-caption language and soften the clash with the full-bleed olive strip.</li>
+      <li>Avoid D if the bar already feels strip-like — symmetric padding reintroduces statusline energy.</li>
+      <li>Do not restyle or hide the olive bar here; that chrome belongs to the program in the viewport.</li>
+    </ol>
+  </section>
+</main>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const read = () => { try { return localStorage.getItem('folio-theme'); } catch { return null; } };
+  const write = (v) => { try { localStorage.setItem('folio-theme', v); } catch {} };
+  const apply = (theme) => {
+    root.setAttribute('data-theme', theme);
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+  };
+  apply(read() || 'dark');
+  button.addEventListener('click', () => {
+    const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    apply(next); write(next);
+  });
+
+  const names = {
+    A: 'A — flush (today)',
+    B: 'B — hairline only',
+    C: 'C — hairline + top pad',
+    D: 'D — padded band',
+    E: 'E — inset + rule',
+    F: 'F — floating dotted rule',
+  };
+  const choice = document.getElementById('choice');
+  const cards = [...document.querySelectorAll('.card')];
+  const picks = [...document.querySelectorAll('.pick')];
+
+  const select = (id) => {
+    cards.forEach((c) => c.classList.toggle('picked', c.dataset.id === id));
+    picks.forEach((p) => {
+      const on = p.closest('.card').dataset.id === id;
+      p.setAttribute('aria-pressed', on ? 'true' : 'false');
+      p.textContent = on ? 'Picked' : 'Pick';
+    });
+    choice.textContent = names[id] || id;
+    try { localStorage.setItem('gmx-footer-pick', id); } catch {}
+  };
+
+  picks.forEach((p) => p.addEventListener('click', () => select(p.closest('.card').dataset.id)));
+  try {
+    const saved = localStorage.getItem('gmx-footer-pick');
+    if (saved && names[saved]) select(saved);
+  } catch {}
+})();
+</script>
+</body>
+</html>

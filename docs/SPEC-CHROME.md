@@ -1,5 +1,10 @@
 # SPEC — Help overlay + Settings mode
 
+> **Scope note (2026-07-27):** ghostmux is tmux-only. The multi-backend
+> prototype (zellij beside tmux) was cut after the v0.3 panel shipped;
+> references to zellij, aux backends, or `z` in this document are historical
+> and no longer describe the product. ghostmux is the tmux fleet navigator.
+
 Status: ready to build. Branch: `panel-flip`. The working tree already
 contains the UNCOMMITTED ghosts implementation (docs/SPEC-GHOSTS.md) — it is
 intentional, must not be reverted, and must stay green. This file is the

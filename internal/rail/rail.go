@@ -11,7 +11,10 @@
 package rail
 
 import (
+	"errors"
 	"fmt"
+
+	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
 // CmdRail runs `ghostmux rail <sub>` — debugging entry points only. The panel
@@ -40,8 +43,16 @@ func cmdOnce(args []string) error {
 			marks = true
 		}
 	}
-	rows := railRows("", ViewState{})
-	rows = append(rows, auxRows(auxSessions(), ViewState{})...)
+	var rows []railRow
+	var queryErrs []error
+	if tmuxPresent() {
+		snapshot, err := tmux.Query()
+		if err != nil {
+			queryErrs = append(queryErrs, fmt.Errorf("tmux unavailable: %w", err))
+		} else {
+			rows = append(rows, buildRows("", ViewState{}, snapshot.Sessions, snapshot.Windows)...)
+		}
+	}
 	for _, r := range rows {
 		switch {
 		case marks:
@@ -52,7 +63,7 @@ func cmdOnce(args []string) error {
 			fmt.Println(r.plain())
 		}
 	}
-	return nil
+	return errors.Join(queryErrs...)
 }
 
 // IdleLine is one line of the idle placeholder (DESIGN.md screen 4).

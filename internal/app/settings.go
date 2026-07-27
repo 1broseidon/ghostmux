@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os/exec"
 	"runtime/debug"
 	"sort"
@@ -12,32 +13,36 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/1broseidon/ghostmux/internal/rail"
+	"github.com/1broseidon/ghostmux/internal/state"
 )
 
-// Settings is a MODE, not an overlay, and help is the other way around. The
-// rule is the panes' contract: left selects, right shows what is selected.
-// Sections left, their fields right — settings honors it exactly, so it gets
-// to be the whole frame. A flat keymap cannot honor it, so it floats.
-//
-// Everything here obeys the same two laws the rail does. Backends, State and
-// About report only what can be observed — an installed binary's own version
-// string, the bytes in the state file, the build info the linker left — and a
-// missing fact renders as missing, never as a guess. And a field the user
-// cannot change says why: with GHOSTMUX_TOGGLE set, Keys is read-only and
-// names the variable, rather than accepting a rebind it would then discard.
+// Settings is a full-frame mode: sections are selected on the left and their
+// fields are shown on the right. Four sections, each earning its place:
+// Fleet is policy (what the fleet remembers, where new work lands), Agents is
+// detection evidence, Panel is the frame's own chrome, and System is every
+// read-only fact — probes, state file, build — in one diagnostic surface.
+// GHOSTMUX_TOGGLE makes the saved toggle field read-only.
 
 type section int
 
 const (
-	secKeys section = iota
-	secRail
+	secFleet section = iota
 	secAgents
-	secBackends
-	secState
-	secAbout
+	secPanel
+	secSystem
 )
 
-var sectionNames = []string{"Keys", "Rail", "Agents", "Backends", "State", "About"}
+var sectionNames = []string{"Fleet", "Agents", "Panel", "System"}
+
+// sectionFields is how many editable fields a section owns. Multi-field
+// sections take a field cursor on ↵; zero-field sections are read-only.
+func sectionFields(sec section) int {
+	switch sec {
+	case secFleet, secPanel:
+		return 2
+	}
+	return 0
+}
 
 const (
 	hexSetCursorBg = "#504945"
@@ -58,31 +63,34 @@ var (
 	stySetTitle = lipgloss.NewStyle().Foreground(lipgloss.Color(hexSetTitle)).Bold(true)
 )
 
-// backendFact is one multiplexer as the box can prove it: where it is and what
-// it says its version is. Absent means absent — never a guess at a version.
+// backendFact is tmux as the box can prove it: where it is and what it says
+// its version is. Absent means absent — never a guess at a version.
 type backendFact struct {
 	name, path, version string
 	installed           bool
 }
 
 type settingsModel struct {
-	cursor  int
-	capture bool            // Keys: the next keypress becomes the toggle
-	editing bool            // Rail/Agents: an inline text edit is open
-	input   textinput.Model // the inline editor
-	msg     string          // result of the last edit
-	msgErr  bool
+	store    *state.Store
+	cursor   int
+	inFields bool            // a multi-field section is entered; j/k move field
+	field    int             // field cursor within the entered section
+	capture  bool            // Panel: the next keypress becomes the toggle
+	editing  bool            // Panel/Agents: an inline text edit is open
+	input    textinput.Model // the inline editor
+	msg      string          // result of the last edit
+	msgErr   bool
 
 	// Probed once on section entry, not per render: a settings pane that
 	// forked two processes per frame would be its own performance bug.
 	backends []backendFact
-	state    *rail.StateInfo
+	state    *state.Info
 }
 
 // openSettings enters settings mode. It is the only constructor: `,` from a
 // rail-focused, non-prompting frame, and nothing else.
 func (m soloModel) openSettings() soloModel {
-	s := &settingsModel{}
+	s := &settingsModel{store: m.store}
 	s.enter()
 	m.settings = s
 	return m
@@ -99,14 +107,13 @@ func (m soloModel) closeSettings() soloModel {
 
 // enter probes whatever the newly-selected section needs, once.
 func (s *settingsModel) enter() {
-	switch section(s.cursor) {
-	case secBackends:
+	s.inFields, s.field = false, 0
+	if section(s.cursor) == secSystem {
 		if s.backends == nil {
 			s.backends = probeBackends()
 		}
-	case secState:
 		if s.state == nil {
-			info := rail.StateFile()
+			info := s.store.Info()
 			s.state = &info
 		}
 	}
@@ -122,6 +129,9 @@ func (m soloModel) updateSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if s.editing {
 		return m.editKey(msg)
+	}
+	if s.inFields {
+		return m.fieldKey(msg)
 	}
 	switch msg.String() {
 	case "esc", "q", ",":
@@ -146,32 +156,75 @@ func (m soloModel) updateSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		s.cursor = len(sectionNames) - 1
 		s.enter()
-	case "enter":
-		return m.startEdit()
+	case "enter", "l", "right":
+		return m.enterSection()
 	}
 	return m, nil
 }
 
-// startEdit opens whatever "change this" means for the selected section. The
-// three read-only sections do nothing, quietly: there is nothing to say about
-// a field that was never offered as editable.
-func (m soloModel) startEdit() (tea.Model, tea.Cmd) {
+// enterSection routes ↵ on a section: multi-field sections hand the cursor to
+// their fields, Agents opens its single editor directly, and System has
+// nothing to edit.
+func (m soloModel) enterSection() (tea.Model, tea.Cmd) {
 	s := m.settings
 	s.msg, s.msgErr = "", false
 	switch section(s.cursor) {
-	case secKeys:
-		if toggleEnvLocked() {
-			s.msg, s.msgErr = "GHOSTMUX_TOGGLE decides this binding — unset it to rebind here", true
-			return m, nil
-		}
-		s.capture = true
-	case secRail:
-		s.editing = true
-		s.input = settingsInput(strconv.Itoa(rail.Width()))
-		return m, textinput.Blink
+	case secFleet, secPanel:
+		s.inFields, s.field = true, 0
 	case secAgents:
 		s.editing = true
 		s.input = settingsInput("")
+		return m, textinput.Blink
+	}
+	return m, nil
+}
+
+// fieldKey moves the field cursor inside an entered section and starts the
+// selected field's editor on ↵.
+func (m soloModel) fieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := m.settings
+	switch msg.String() {
+	case "esc", "h", "left":
+		s.inFields = false
+	case "q", ",":
+		return m.closeSettings(), nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "j", "down":
+		if s.field < sectionFields(section(s.cursor))-1 {
+			s.field++
+			s.msg = ""
+		}
+	case "k", "up":
+		if s.field > 0 {
+			s.field--
+			s.msg = ""
+		}
+	case "enter":
+		return m.editField()
+	}
+	return m, nil
+}
+
+// editField starts the editor for the field under the cursor. Each field
+// declares its edit kind here: cycle, capture, or inline input.
+func (m soloModel) editField() (tea.Model, tea.Cmd) {
+	s := m.settings
+	s.msg, s.msgErr = "", false
+	switch {
+	case section(s.cursor) == secFleet && s.field == 0:
+		return m.cycleGhostDir()
+	case section(s.cursor) == secFleet && s.field == 1:
+		return m.cycleCreateDir()
+	case section(s.cursor) == secPanel && s.field == 0:
+		if toggleEnvLocked() {
+			s.msg, s.msgErr = "GHOSTMUX_TOGGLE is set; unset it to change this setting", true
+			return m, nil
+		}
+		s.capture = true
+	case section(s.cursor) == secPanel && s.field == 1:
+		s.editing = true
+		s.input = settingsInput(strconv.Itoa(rail.Width()))
 		return m, textinput.Blink
 	}
 	return m, nil
@@ -187,14 +240,14 @@ func (m soloModel) captureToggle(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		return m, nil
 	}
-	cfg := rail.LoadSettings()
+	cfg := settingsFromStore(m.store)
 	cfg.Toggle = []string{key}
-	if err := rail.SaveSettings(cfg); err != nil {
-		s.msg, s.msgErr = err.Error(), true
-		return m, nil
+	if err := saveSettings(m.store, cfg); err != nil {
+		return m.settingsSaveFailed(err)
 	}
-	m = m.applyToggleKeys(toggleKeys())
-	s.msg = "toggle is now " + key
+	s.state = nil
+	m = m.applyToggleKeys(toggleKeys(m.store))
+	s.msg = "toggle key: " + key
 	return m, nil
 }
 
@@ -211,7 +264,7 @@ func (m soloModel) applyToggleKeys(keys []string) soloModel {
 	return m
 }
 
-// editKey handles the inline text editor for Rail width and Agents.
+// editKey handles the inline text editor for rail width and Agents.
 func (m soloModel) editKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.settings
 	switch msg.String() {
@@ -222,7 +275,7 @@ func (m soloModel) editKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		value := strings.TrimSpace(s.input.Value())
 		s.editing = false
 		switch section(s.cursor) {
-		case secRail:
+		case secPanel:
 			return m.applyWidth(value)
 		case secAgents:
 			return m.applyAgent(value)
@@ -234,75 +287,139 @@ func (m soloModel) editKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// applyWidth saves and applies a new rail width. Applying it means re-running
-// the resize path with the current terminal size, so the rail, the divider,
-// the viewport AND the child's pty all move now — a width that only took
-// effect on the next launch would be a setting that lies.
+// applyWidth saves a clamped candidate before changing layout, then resizes
+// the rail, viewport, and embedded terminal immediately.
 func (m soloModel) applyWidth(value string) (tea.Model, tea.Cmd) {
 	s := m.settings
 	n, err := strconv.Atoi(value)
 	if err != nil {
-		s.msg, s.msgErr = "width must be a number", true
+		s.msg, s.msgErr = "width must be an integer", true
 		return m, nil
 	}
-	got := rail.SetWidth(n)
-	cfg := rail.LoadSettings()
+	got := rail.ClampWidth(n)
+	cfg := settingsFromStore(m.store)
 	cfg.RailWidth = got
-	if err := rail.SaveSettings(cfg); err != nil {
-		s.msg, s.msgErr = err.Error(), true
-		return m, nil
+	if err := saveSettings(m.store, cfg); err != nil {
+		return m.settingsSaveFailed(err)
 	}
-	s.msg = "rail width " + strconv.Itoa(got)
+	s.state = nil
+	rail.SetWidth(got)
+	s.msg = "rail width: " + strconv.Itoa(got)
 	if got != n {
-		s.msg += " (clamped to the 20–60 range)"
+		s.msg += " (clamped to 20-60)"
 	}
 	return m.resize(m.w, m.h)
 }
 
-// applyAgent adds a name, or removes it if this user added it before. One key
-// with toggle semantics rather than two: the pane states the rule, and an
-// add/remove pair would be two keys for a list that is usually three names
-// long. Built-ins are never removable — ghostmux can see them either way.
+// applyAgent toggles an additional command name. Built-in names are fixed.
 func (m soloModel) applyAgent(name string) (tea.Model, tea.Cmd) {
 	s := m.settings
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return m, nil
 	}
-	extras := map[string]bool{}
-	for _, e := range rail.ExtraAgentCmds() {
-		extras[e] = true
+	for _, builtin := range rail.BuiltinAgentCmds() {
+		if builtin == name {
+			s.msg, s.msgErr = name+" is built in and cannot be removed", true
+			return m, nil
+		}
 	}
+	cfg := settingsFromStore(m.store)
+	extras := map[string]bool{}
+	for _, extra := range cfg.Agents {
+		extras[extra] = true
+	}
+	action := "added"
 	if extras[name] {
 		delete(extras, name)
-		rail.RemoveAgentCmd(name)
-		s.msg = "removed " + name
+		action = "removed"
 	} else {
-		for _, b := range rail.BuiltinAgentCmds() {
-			if b == name {
-				s.msg, s.msgErr = name+" is built in — it is always detected", true
-				return m, nil
-			}
-		}
 		extras[name] = true
-		rail.AddAgentCmds([]string{name})
-		s.msg = "added " + name
 	}
 	list := make([]string, 0, len(extras))
-	for e := range extras {
-		list = append(list, e)
+	for extra := range extras {
+		list = append(list, extra)
 	}
 	sort.Strings(list)
-	cfg := rail.LoadSettings()
 	cfg.Agents = list
-	if err := rail.SaveSettings(cfg); err != nil {
-		s.msg, s.msgErr = err.Error(), true
+	if err := saveSettings(m.store, cfg); err != nil {
+		return m.settingsSaveFailed(err)
+	}
+	s.state = nil
+	rail.SetExtraAgentCmds(list)
+	s.msg = "agent " + action + ": " + name
+	return m, nil
+}
+
+// cycleGhostDir flips between launch directory and last working directory.
+// Two choices, one key — no free-text enum that could invent a third mode.
+func (m soloModel) cycleGhostDir() (tea.Model, tea.Cmd) {
+	s := m.settings
+	cfg := settingsFromStore(m.store)
+	next := rail.GhostDirLast
+	msg := "ghost dir: last working directory"
+	if rail.NormalizeGhostDir(cfg.GhostDir) == rail.GhostDirLast {
+		next = ""
+		msg = "ghost dir: launch directory"
+	}
+	cfg.GhostDir = next
+	if err := saveSettings(m.store, cfg); err != nil {
+		return m.settingsSaveFailed(err)
+	}
+	s.state = nil
+	rail.SetGhostDir(cfg.GhostDir)
+	s.msg = msg
+	return m, nil
+}
+
+// cycleCreateDir flips where `n` starts a new tmux session: home, or the
+// viewport session's active pane cwd.
+func (m soloModel) cycleCreateDir() (tea.Model, tea.Cmd) {
+	s := m.settings
+	cfg := settingsFromStore(m.store)
+	next := rail.CreateDirCurrent
+	msg := "new session dir: current session's cwd"
+	if rail.NormalizeCreateDir(cfg.CreateDir) == rail.CreateDirCurrent {
+		next = ""
+		msg = "new session dir: home"
+	}
+	cfg.CreateDir = next
+	if err := saveSettings(m.store, cfg); err != nil {
+		return m.settingsSaveFailed(err)
+	}
+	s.state = nil
+	rail.SetCreateDir(cfg.CreateDir)
+	s.msg = msg
+	return m, nil
+}
+
+func (m soloModel) settingsSaveFailed(err error) (tea.Model, tea.Cmd) {
+	s := m.settings
+	s.state = nil
+	if !errors.Is(err, state.ErrConflict) {
+		s.msg = "state save failed: " + err.Error()
+		s.msgErr = true
+		return m, nil
+	}
+
+	adopted := settingsFromStore(m.store)
+	width := adopted.RailWidth
+	if width == 0 {
+		width = rail.DefaultWidth()
+	}
+	widthChanged := rail.Width() != width
+	applySettings(adopted)
+	m = m.applyToggleKeys(toggleKeys(m.store))
+	m.rail = m.rail.SyncState()
+	s.msg = "state changed in another panel; change not saved"
+	s.msgErr = true
+	if widthChanged {
+		return m.resize(m.w, m.h)
 	}
 	return m, nil
 }
 
-// settingsInput is the inline editor, styled like the rail's prompt so the two
-// text fields in the program look like one idea.
+// settingsInput builds the shared inline editor style.
 func settingsInput(value string) textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = ""
@@ -359,18 +476,14 @@ func (m soloModel) sectionDetail(w int) string {
 	s := m.settings
 	var lines []string
 	switch section(s.cursor) {
-	case secKeys:
-		lines = m.keysDetail()
-	case secRail:
-		lines = m.railDetail()
+	case secFleet:
+		lines = m.fleetDetail()
 	case secAgents:
 		lines = m.agentsDetail(w)
-	case secBackends:
-		lines = backendsDetail(s.backends)
-	case secState:
-		lines = stateDetail(s.state)
-	case secAbout:
-		lines = aboutDetail()
+	case secPanel:
+		lines = m.panelDetail()
+	case secSystem:
+		lines = m.systemDetail()
 	}
 	head := []string{"", " " + stySetTitle.Render(sectionNames[s.cursor]), ""}
 	out := append(head, lines...)
@@ -384,65 +497,133 @@ func (m soloModel) sectionDetail(w int) string {
 	return strings.Join(out, "\n")
 }
 
-func (m soloModel) keysDetail() []string {
-	keys := toggleKeys()
+// fieldRow renders one editable field: a cursor marker when the field cursor
+// sits on it, the label, and the current value.
+func (m soloModel) fieldRow(sec section, idx int, label, value string) string {
+	s := m.settings
+	marker, labelSty := " ", stySetLabel
+	if s.inFields && section(s.cursor) == sec && s.field == idx {
+		marker, labelSty = "▸", stySetName
+	}
+	return " " + stySetTitle.Render(marker) + " " + labelSty.Render(padRight(label, 17)) + stySetValue.Render(value)
+}
+
+// fieldNavHint is the one navigation line every multi-field section ends on.
+func (m soloModel) fieldNavHint() string {
+	if m.settings.inFields {
+		return " " + stySetHint.Render("j/k select · ↵ change · esc back")
+	}
+	return " " + stySetHint.Render("↵ selects a setting")
+}
+
+func (m soloModel) fleetDetail() []string {
+	cfg := settingsFromStore(m.store)
+	ghost := "launch directory"
+	if rail.NormalizeGhostDir(cfg.GhostDir) == rail.GhostDirLast {
+		ghost = "last working directory"
+	}
+	create := "home"
+	if rail.NormalizeCreateDir(cfg.CreateDir) == rail.CreateDirCurrent {
+		create = "current session's cwd"
+	}
+	return []string{
+		m.fieldRow(secFleet, 0, "ghost dir", ghost),
+		m.fieldRow(secFleet, 1, "new session dir", create),
+		"",
+		" " + stySetHint.Render("ghost dir: where ↵ summons a dead grouped member"),
+		" " + stySetHint.Render("  launch = where the session was created (#{session_path})"),
+		" " + stySetHint.Render("  last   = active pane cwd (#{pane_current_path})"),
+		" " + stySetHint.Render("new session dir: where n starts a tmux session"),
+		"",
+		m.fieldNavHint(),
+	}
+}
+
+func (m soloModel) panelDetail() []string {
+	keys := m.activeToggleKeys()
 	source := "default"
-	if len(rail.LoadSettings().Toggle) > 0 {
-		source = "state file"
+	if hasSavedToggle(m.store) {
+		source = "saved setting"
 	}
 	if toggleEnvLocked() {
-		source = "env (GHOSTMUX_TOGGLE)"
+		source = "GHOSTMUX_TOGGLE"
 	}
 	out := []string{
-		" " + stySetLabel.Render("rail ⇄ viewport  ") + stySetValue.Render(strings.Join(keys, "  ")),
-		" " + stySetLabel.Render("source           ") + stySetName.Render(source),
+		m.fieldRow(secPanel, 0, "toggle key", strings.Join(keys, "  ")),
+		"   " + stySetLabel.Render(padRight("source", 17)) + stySetName.Render(source),
+		m.fieldRow(secPanel, 1, "rail width", strconv.Itoa(rail.Width())+" cols (20–60)"),
 		"",
 	}
 	switch {
 	case m.settings.capture:
-		out = append(out, " "+stySetTitle.Render("press the new toggle key")+stySetHint.Render(" · esc cancels"))
+		out = append(out, " "+stySetTitle.Render("press new toggle key; esc cancels"))
+	case m.settings.editing:
+		out = append(out, " "+stySetLabel.Render("width: ")+m.settings.input.View())
 	case toggleEnvLocked():
 		out = append(out,
-			" "+stySetHint.Render("read-only: GHOSTMUX_TOGGLE is set in this"),
-			" "+stySetHint.Render("environment and wins over the state file."))
+			" "+stySetHint.Render("GHOSTMUX_TOGGLE overrides the saved setting"),
+			m.fieldNavHint())
 	default:
-		out = append(out, " "+stySetHint.Render("↵ rebind — the next key you press becomes it"))
+		out = append(out,
+			" "+stySetHint.Render("width applies immediately to the embedded terminal"),
+			m.fieldNavHint())
 	}
 	return out
 }
 
-func (m soloModel) railDetail() []string {
-	out := []string{
-		" " + stySetLabel.Render("width  ") + stySetValue.Render(strconv.Itoa(rail.Width())+" cols"),
-		" " + stySetLabel.Render("range  ") + stySetName.Render("20–60 (default 30)"),
-		"",
+func (m soloModel) activeToggleKeys() []string {
+	keys := []string{m.toggleLabel}
+	var rest []string
+	for key := range m.toggles {
+		if key != m.toggleLabel {
+			rest = append(rest, key)
+		}
 	}
-	if m.settings.editing {
-		out = append(out, " "+stySetLabel.Render("width: ")+m.settings.input.View())
-	} else {
-		out = append(out, " "+stySetHint.Render("↵ edit — applied immediately, pty and all"))
+	sort.Strings(rest)
+	return append(keys, rest...)
+}
+
+func hasSavedToggle(store *state.Store) bool {
+	if store == nil {
+		return false
 	}
-	return out
+	doc := store.Snapshot()
+	return doc.Settings != nil && len(doc.Settings.Toggle) > 0
 }
 
 func (m soloModel) agentsDetail(w int) []string {
 	out := []string{
-		" " + stySetLabel.Render("built in ") + stySetHint.Render(wrapList(rail.BuiltinAgentCmds(), max(w-11, 8))),
+		" " + stySetLabel.Render("built in   ") + stySetHint.Render(wrapList(rail.BuiltinAgentCmds(), max(w-13, 8))),
 	}
 	extras := rail.ExtraAgentCmds()
 	if len(extras) == 0 {
-		out = append(out, " "+stySetLabel.Render("yours    ")+stySetHint.Render("(none)"))
+		out = append(out, " "+stySetLabel.Render("additional ")+stySetHint.Render("(none)"))
 	} else {
-		out = append(out, " "+stySetLabel.Render("yours    ")+stySetValue.Render(wrapList(extras, max(w-11, 8))))
+		out = append(out, " "+stySetLabel.Render("additional ")+stySetValue.Render(wrapList(extras, max(w-13, 8))))
 	}
 	out = append(out, "")
 	if m.settings.editing {
-		out = append(out, " "+stySetLabel.Render("agent: ")+m.settings.input.View())
+		out = append(out, " "+stySetLabel.Render("command name: ")+m.settings.input.View())
 	} else {
 		out = append(out,
-			" "+stySetHint.Render("↵ type a command name: a new one is added,"),
-			" "+stySetHint.Render("one of yours is removed. Built-ins stay."))
+			" "+stySetHint.Render("↵ enter a command name to add or remove it"),
+			" "+stySetHint.Render("built-ins cannot be removed"))
 	}
+	return out
+}
+
+// systemDetail is the one read-only surface: build identity, backend probes,
+// and state-file health, stacked. Facts to check, not choices to make.
+func (m soloModel) systemDetail() []string {
+	s := m.settings
+	out := []string{
+		" " + stySetName.Render("ghostmux") + "  " + stySetHint.Render("The tmux fleet navigator"),
+		" " + stySetLabel.Render("version  ") + stySetValue.Render(buildVersion()),
+		"",
+	}
+	out = append(out, backendsDetail(s.backends)...)
+	out = append(out, "")
+	out = append(out, stateDetail(s.state)...)
 	return out
 }
 
@@ -459,50 +640,72 @@ func backendsDetail(facts []backendFact) []string {
 			out = append(out, " "+strings.Repeat(" ", 8)+stySetValue.Render(f.version))
 		}
 	}
-	out = append(out, "", " "+stySetHint.Render("what each binary reports about itself"))
+	out = append(out, "", " "+stySetHint.Render("versions reported by installed binaries"))
 	return out
 }
 
-func stateDetail(info *rail.StateInfo) []string {
+func stateDetail(info *state.Info) []string {
 	if info == nil {
 		return nil
 	}
 	if info.Path == "" {
-		return []string{" " + stySetHint.Render("no state directory on this box")}
+		return []string{" " + stySetHint.Render("state path unavailable; writes disabled")}
 	}
-	out := []string{" " + stySetLabel.Render("file  ") + stySetName.Render(info.Path)}
-	if !info.Exists {
-		return append(out, "", " "+stySetHint.Render("not created yet — it appears with your first group"))
+	out := []string{
+		" " + stySetLabel.Render("file    ") + stySetName.Render(info.Path),
+		" " + stySetLabel.Render("status  ") + stySetValue.Render(stateStatusText(info.Status, info.Version)),
 	}
-	counts := "groups " + strconv.Itoa(info.Groups) +
-		" · members " + strconv.Itoa(info.Members) +
-		" · dirs " + strconv.Itoa(info.Dirs) +
-		" · collapsed " + strconv.Itoa(info.Collapsed)
-	return append(out,
-		" "+stySetLabel.Render("holds ")+stySetValue.Render(counts),
-		" "+stySetLabel.Render("saved ")+stySetName.Render(info.ModTime.Format("2006-01-02 15:04:05")),
+	switch info.Status {
+	case state.StatusMissing:
+		out = append(out, "", " "+stySetHint.Render("created when settings or groups are first saved"))
+	case state.StatusValid, state.StatusLegacy:
+		counts := "groups " + strconv.Itoa(info.Groups) +
+			" · members " + strconv.Itoa(info.Members) +
+			" · dirs " + strconv.Itoa(info.Dirs) +
+			" · collapsed " + strconv.Itoa(info.Collapsed)
+		out = append(out,
+			" "+stySetLabel.Render("saved file contents  ")+stySetValue.Render(counts),
+			" "+stySetLabel.Render("modified             ")+stySetName.Render(info.ModTime.Format("2006-01-02 15:04:05")))
+		if info.Status == state.StatusLegacy {
+			out = append(out, "", " "+stySetHint.Render("schema version 1 is written on the next successful save"))
+		}
+	default:
+		out = append(out, " "+stySetHint.Render("state is read-only"))
+		if info.Error != "" {
+			out = append(out, " "+stySetErr.Render(info.Error))
+		}
+	}
+	out = append(out,
 		"",
-		" "+stySetHint.Render("read from the file, not from the live fleet"))
+		" "+stySetLabel.Render("backup  ")+stySetName.Render(info.BackupPath),
+		" "+stySetLabel.Render("status  ")+stySetHint.Render(stateStatusText(info.BackupStatus, info.BackupVersion)))
+	if info.BackupError != "" {
+		out = append(out, " "+stySetErr.Render(info.BackupError))
+	}
+	out = append(out, "", " "+stySetHint.Render("backup is retained but not restored automatically"))
+	return out
 }
 
-func aboutDetail() []string {
-	return []string{
-		" " + stySetName.Render("ghostmux"),
-		" " + stySetHint.Render("attach-anywhere mission control for your"),
-		" " + stySetHint.Render("multiplexers"),
-		"",
-		" " + stySetLabel.Render("version  ") + stySetValue.Render(buildVersion()),
-		"",
-		" " + stySetLabel.Render("laws"),
-		" " + stySetHint.Render("  render evidence, never inference"),
-		" " + stySetHint.Render("  ship only what the multiplexer alone"),
-		" " + stySetHint.Render("  can't give you"),
+func stateStatusText(status string, version int) string {
+	switch status {
+	case state.StatusValid:
+		return "valid (schema version " + strconv.Itoa(version) + ")"
+	case state.StatusLegacy:
+		return "legacy (unversioned)"
+	case state.StatusCorrupt:
+		return "corrupt"
+	case state.StatusUnreadable:
+		return "unreadable"
+	case state.StatusUnsupported:
+		return "unsupported schema version"
+	case state.StatusRecoveryRequired:
+		return "recovery required"
+	default:
+		return "missing"
 	}
 }
 
-// buildVersion reports what the linker actually recorded. A build with no
-// module version and no vcs stamp is a dev build, and says so — inventing a
-// number here would be the one thing this program refuses to do.
+// buildVersion reports linker build information. An unstamped build is dev.
 func buildVersion() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -529,29 +732,22 @@ func buildVersion() string {
 	return "dev build"
 }
 
-// probeBackends asks each multiplexer where it is and what version it is —
-// once, on entry to the section. Nothing is inferred from the other's answer:
-// a box with zellij and no tmux reports exactly that.
+// probeBackends asks tmux where it is and what version it is — once, on entry
+// to the section. Absent reports exactly that.
 func probeBackends() []backendFact {
-	var out []backendFact
-	for _, b := range []struct{ name, flag string }{{"tmux", "-V"}, {"zellij", "--version"}} {
-		f := backendFact{name: b.name}
-		path, err := exec.LookPath(b.name)
-		if err != nil {
-			out = append(out, f)
-			continue
-		}
-		f.installed, f.path = true, path
-		if o, err := exec.Command(b.name, b.flag).Output(); err == nil {
-			f.version = strings.TrimSpace(strings.SplitN(string(o), "\n", 2)[0])
-		}
-		out = append(out, f)
+	f := backendFact{name: "tmux"}
+	path, err := exec.LookPath("tmux")
+	if err != nil {
+		return []backendFact{f}
 	}
-	return out
+	f.installed, f.path = true, path
+	if o, err := exec.Command("tmux", "-V").Output(); err == nil {
+		f.version = strings.TrimSpace(strings.SplitN(string(o), "\n", 2)[0])
+	}
+	return []backendFact{f}
 }
 
-// wrapList joins names, cutting the tail when the row runs out of room. It
-// says "+N more" rather than truncating a name into a lie.
+// wrapList joins complete names and reports the omitted count when needed.
 func wrapList(names []string, width int) string {
 	var kept []string
 	used := 0

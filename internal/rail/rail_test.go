@@ -1,8 +1,10 @@
 package rail
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,18 +16,119 @@ import (
 // tmux binary.
 func fakeRunner(t *testing.T, outputs map[string]string) func(args ...string) (string, error) {
 	t.Helper()
+	normalized := normalizeTmuxFixtures(outputs)
 	return func(args ...string) (string, error) {
 		if len(args) == 0 {
 			t.Fatalf("fakeRunner: called with no args")
 		}
-		out, ok := outputs[args[0]]
+		out, ok := normalized[args[0]]
 		if !ok {
-			// Subcommand not stubbed: behave like "no data" (mirrors a real
-			// tmux server that simply has none, e.g. no clients attached).
+			if args[0] == "has-session" {
+				target := strings.TrimPrefix(args[len(args)-1], "=")
+				for _, line := range strings.Split(normalized["list-sessions"], "\n") {
+					if fields := strings.Split(line, "\t"); len(fields) > 0 && fields[0] == target {
+						return "", nil
+					}
+				}
+				return "", fmt.Errorf("no such session")
+			}
+			// Other unstubbed queries have no rows.
 			return "", nil
 		}
 		return out, nil
 	}
+}
+
+// normalizeTmuxFixtures lets older rail-focused fixtures omit fields that are
+// irrelevant to their assertion while the tmux package's own tests remain
+// strict about the production query schema and dependent-row consistency.
+func normalizeTmuxFixtures(outputs map[string]string) map[string]string {
+	out := make(map[string]string, len(outputs)+2)
+	for command, value := range outputs {
+		out[command] = value
+	}
+
+	ids := map[string]string{}
+	var sessionRows, clientRows []string
+	for _, line := range fixtureLines(outputs["list-sessions"]) {
+		fields := strings.Split(line, "\t")
+		if len(fields) == 4 {
+			id := fmt.Sprintf("$%d", len(ids)+1)
+			ids[fields[0]] = id
+			fields = []string{fields[0], id, fields[1], fields[2], fields[3]}
+		} else if len(fields) == 5 {
+			ids[fields[0]] = fields[1]
+		}
+		if len(fields) == 5 {
+			if count, err := strconv.Atoi(fields[2]); err == nil {
+				for i := 0; i < count; i++ {
+					clientRows = append(clientRows, fmt.Sprintf("%s\t/dev/pts/%d", fields[0], i+1))
+				}
+			}
+		}
+		sessionRows = append(sessionRows, strings.Join(fields, "\t"))
+	}
+	out["list-sessions"] = fixtureOutput(sessionRows)
+	if _, explicit := outputs["list-clients"]; !explicit {
+		out["list-clients"] = fixtureOutput(clientRows)
+	}
+
+	var windowRows, paneRows []string
+	windowIDs := map[string]string{}
+	for _, line := range fixtureLines(outputs["list-windows"]) {
+		fields := strings.Split(line, "\t")
+		panePath := ""
+		if len(fields) == 8 {
+			// Legacy 7-field row plus an explicit active-pane path for ghost-dir tests.
+			panePath = fields[7]
+			fields = fields[:7]
+		}
+		if len(fields) == 7 {
+			fields = append([]string{fields[0], ids[fields[0]]}, fields[1:]...)
+		}
+		if len(fields) == 8 {
+			key := fields[0] + ":" + fields[2]
+			windowID := windowIDs[key]
+			if windowID == "" {
+				windowID = fmt.Sprintf("@%d", len(windowIDs)+1)
+				windowIDs[key] = windowID
+			}
+			// Production parsing remains strict. This rail-only fixture adapter
+			// supplies explicit stable IDs and timestamps for legacy row tests.
+			fields = []string{
+				fields[0], fields[1], windowID, fields[2], fields[3], fields[4],
+				fields[5], fields[6], "100", fields[7], panePath,
+			}
+		}
+		if len(fields) == 10 {
+			// Pre-CurrentPath fixtures: append an empty pane path.
+			fields = append(fields, "")
+		}
+		if len(fields) == 11 {
+			paneRows = append(paneRows, fields[0]+"\t"+fields[3]+"\t")
+		}
+		windowRows = append(windowRows, strings.Join(fields, "\t"))
+	}
+	out["list-windows"] = fixtureOutput(windowRows)
+	if _, explicit := outputs["list-panes"]; !explicit {
+		out["list-panes"] = fixtureOutput(paneRows)
+	}
+	return out
+}
+
+func fixtureLines(out string) []string {
+	out = strings.TrimSuffix(out, "\n")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+func fixtureOutput(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func withFakeRunner(t *testing.T, outputs map[string]string) {
@@ -46,7 +149,7 @@ func TestRailRows(t *testing.T) {
 		{
 			name: "sessions and windows parsed",
 			outputs: map[string]string{
-				"list-sessions": "alpha\t0\nbeta\t1\n",
+				"list-sessions": "alpha\t0\t\t\nbeta\t1\t\t\n",
 				"list-windows": "alpha\t1\tvim\t1\t0\t0\t0\n" +
 					"alpha\t2\tshell\t0\t0\t0\t0\n" +
 					"beta\t1\tzsh\t1\t0\t0\t0\n",
@@ -63,7 +166,7 @@ func TestRailRows(t *testing.T) {
 			name: "hub session excluded by name",
 			hub:  "hub",
 			outputs: map[string]string{
-				"list-sessions": "hub\t1\nwork\t0\n",
+				"list-sessions": "hub\t1\t\t\nwork\t0\t\t\n",
 				"list-windows": "hub\t1\trail\t1\t0\t0\t0\n" +
 					"work\t1\tzsh\t1\t0\t0\t0\n",
 			},
@@ -74,7 +177,7 @@ func TestRailRows(t *testing.T) {
 		{
 			name: "attached flag reflects session_attached",
 			outputs: map[string]string{
-				"list-sessions": "solo\t2\n",
+				"list-sessions": "solo\t2\t\t\n",
 				"list-windows":  "solo\t1\tzsh\t1\t0\t0\t0\n",
 			},
 			want: []railRow{
@@ -84,7 +187,7 @@ func TestRailRows(t *testing.T) {
 		{
 			name: "window marks from bell, activity and done flags aggregate to the session",
 			outputs: map[string]string{
-				"list-sessions": "s\t0\n",
+				"list-sessions": "s\t0\t\t\n",
 				"list-windows": "s\t1\tone\t1\t1\t0\t0\n" + // bell only
 					"s\t2\ttwo\t0\t0\t1\t0\n" + // activity only
 					"s\t3\tthree\t0\t0\t0\t1\n" + // done only
@@ -103,7 +206,7 @@ func TestRailRows(t *testing.T) {
 			name: "inView mark on locked window and its session",
 			view: ViewState{Sess: "s", Win: "2"},
 			outputs: map[string]string{
-				"list-sessions": "s\t0\n",
+				"list-sessions": "s\t0\t\t\n",
 				"list-windows": "s\t1\tone\t1\t0\t0\t0\n" +
 					"s\t2\ttwo\t0\t0\t0\t0\n",
 			},
@@ -117,7 +220,7 @@ func TestRailRows(t *testing.T) {
 			name: "whole-session lock marks the active window inView",
 			view: ViewState{Sess: "s", Win: ""},
 			outputs: map[string]string{
-				"list-sessions": "s\t0\n",
+				"list-sessions": "s\t0\t\t\n",
 				"list-windows": "s\t1\tone\t1\t0\t0\t0\n" +
 					"s\t2\ttwo\t0\t0\t0\t0\n",
 			},
@@ -138,10 +241,89 @@ func TestRailRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakeRunner(t, tc.outputs)
 			got := railRows(tc.hub, tc.view)
+			for i := range got {
+				got[i].instanceID = "" // instance provenance has a focused test below
+				got[i].activityAt = 0  // ordering evidence has the Return Queue tests
+			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("railRows(%q) =\n  %#v\nwant\n  %#v", tc.hub, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTmuxSessionInstanceProvenanceReachesSessionAndWindowRows(t *testing.T) {
+	sessions := []tmux.Session{{Name: "alpha", SessionID: "$42"}}
+	windows := []tmux.Window{
+		{Session: "alpha", SessionID: "$42", Index: "1", Name: "one", Active: true},
+		{Session: "alpha", SessionID: "$42", Index: "2", Name: "two"},
+	}
+	rows := buildRows("", ViewState{}, sessions, windows)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	for i, row := range rows {
+		if row.instanceID != "$42" {
+			t.Fatalf("row %d instance = %q, want $42: %+v", i, row.instanceID, row)
+		}
+	}
+}
+
+func TestOwnedShadowsHiddenButLegacyPrefixSessionsVisible(t *testing.T) {
+	ownedName := "gm-view-panel-1"
+	sessions := []tmux.Session{
+		{Name: ownedName, ViewOwner: "v1:" + ownedName},
+		{Name: "gm-view-untagged"},
+		{Name: "gm-view-malformed", ViewOwner: "v1:someone-else"},
+	}
+	windows := []tmux.Window{
+		{Session: ownedName, Index: "1", Name: "zsh", Active: true},
+		{Session: "gm-view-untagged", Index: "1", Name: "zsh", Active: true},
+		{Session: "gm-view-malformed", Index: "1", Name: "zsh", Active: true},
+	}
+
+	rows := buildRows("", ViewState{}, sessions, windows)
+	var names []string
+	for _, row := range rows {
+		names = append(names, row.sess)
+	}
+	want := []string{"gm-view-untagged", "gm-view-malformed"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("visible prefix sessions = %v, want %v", names, want)
+	}
+}
+
+func TestDoneTrackerSkipsOnlyExactOwnedShadows(t *testing.T) {
+	ownedName := "gm-view-panel-1"
+	sessions := []tmux.Session{
+		{Name: ownedName, ViewOwner: "v1:" + ownedName},
+		{Name: "gm-view-untagged"},
+		{Name: "gm-view-malformed", ViewOwner: "v1:other"},
+	}
+	prime := []tmux.Window{
+		win(ownedName, "1", "node"),
+		win("gm-view-untagged", "1", "node"),
+		win("gm-view-malformed", "1", "node"),
+	}
+	then := []tmux.Window{
+		win(ownedName, "1", "zsh"),
+		win("gm-view-untagged", "1", "zsh"),
+		win("gm-view-malformed", "1", "zsh"),
+	}
+	var seen []string
+	orig := tmux.Runner
+	tmux.Runner = setDoneCalls(&seen)
+	t.Cleanup(func() { tmux.Runner = orig })
+
+	dt := newDoneTracker()
+	nope := func(string, string) bool { return false }
+	dt.observe(prime, sessions, "", nope)
+	seen = nil
+	dt.observe(then, sessions, "", nope)
+	sort.Strings(seen)
+	want := []string{"gm-view-malformed:1=1", "gm-view-untagged:1=1"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("legacy done transitions = %v, want %v", seen, want)
 	}
 }
 
@@ -312,9 +494,9 @@ func TestDoneTrackerTransitions(t *testing.T) {
 			}
 
 			dt := newDoneTracker()
-			dt.observe(tc.prime, tc.hub, suppress) // seed; ignore its calls
+			dt.observe(tc.prime, nil, tc.hub, suppress) // seed; ignore its calls
 			seen = nil
-			dt.observe(tc.then, tc.hub, suppress)
+			dt.observe(tc.then, nil, tc.hub, suppress)
 
 			sort.Strings(seen)
 			sort.Strings(tc.want)
@@ -333,12 +515,12 @@ func TestDoneTrackerForgetsVanishedPanes(t *testing.T) {
 	nope := func(string, string) bool { return false }
 
 	dt := newDoneTracker()
-	dt.observe([]tmux.Window{win("work", "1", "node")}, "", nope) // seed node
-	dt.observe(nil, "", nope)                                     // window gone: forget it
+	dt.observe([]tmux.Window{win("work", "1", "node")}, nil, "", nope) // seed node
+	dt.observe(nil, nil, "", nope)                                     // window gone: forget it
 	seen = nil
 	// The pane reappears already at a shell. Because the stale "node" was
 	// forgotten, this must NOT read as a node→zsh transition.
-	dt.observe([]tmux.Window{win("work", "1", "zsh")}, "", nope)
+	dt.observe([]tmux.Window{win("work", "1", "zsh")}, nil, "", nope)
 
 	if len(seen) != 0 {
 		t.Errorf("SetDone called after pane churn: %v", seen)

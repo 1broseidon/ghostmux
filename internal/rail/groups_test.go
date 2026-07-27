@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/1broseidon/ghostmux/internal/state"
 )
 
 func sessionRow(name string) railRow { return railRow{depth: 0, label: name, sess: name} }
@@ -114,7 +116,7 @@ func TestGroupAndSessionOfSameNameFoldIndependently(t *testing.T) {
 func TestMoveWithinAndAcrossGroups(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\nweb\t0\ndots\t0\n",
+		"list-sessions": "api\t0\t\t\nweb\t0\t\t\ndots\t0\t\t\n",
 		"list-windows": "api\t1\tzsh\t1\t0\t0\t0\n" +
 			"web\t1\tzsh\t1\t0\t0\t0\n" +
 			"dots\t1\tzsh\t1\t0\t0\t0\n",
@@ -158,7 +160,7 @@ func TestMoveWithinAndAcrossGroups(t *testing.T) {
 func TestCursorFollowsTheMovedRow(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\nweb\t0\n",
+		"list-sessions": "api\t0\t\t\nweb\t0\t\t\n",
 		"list-windows": "api\t1\tzsh\t1\t0\t0\t0\n" +
 			"web\t1\tzsh\t1\t0\t0\t0\n",
 	})
@@ -187,26 +189,44 @@ func TestGroupsRoundTripOnDisk(t *testing.T) {
 		got[0].Members[1] != "zellij:myz" {
 		t.Errorf("round trip lost data: %+v", got)
 	}
-	// a group may span backends — that is the reason this is a file and not
-	// a tmux user-option
+	// A key written by the retired multi-backend prototype survives the round
+	// trip untouched: this build never renders it, but it never destroys it.
 	if !strings.Contains(strings.Join(got[0].Members, ","), "zellij:") {
-		t.Errorf("cross-backend membership not preserved")
+		t.Errorf("foreign-prefix membership not preserved")
 	}
 }
 
-// TestCorruptStateFileDegradesToNoGroups: a bad file must never stop the
-// panel from opening.
-func TestCorruptStateFileDegradesToNoGroups(t *testing.T) {
+// TestCorruptStateFileIsVisibleAndWriteBlocked verifies that startup remains
+// usable without treating corruption as empty writable state.
+func TestCorruptStateFileIsVisibleAndWriteBlocked(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
+	path := dir + "/ghostmux/groups.json"
 	if err := os.MkdirAll(dir+"/ghostmux", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dir+"/ghostmux/groups.json", []byte("{not json"), 0o644); err != nil {
+	original := []byte("{not json")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, _ := loadState(); got != nil {
-		t.Errorf("corrupt file yielded %+v, want no groups", got)
+	store, err := state.Open(path)
+	if err == nil {
+		t.Fatal("corrupt state loaded without error")
+	}
+	withFakeRunner(t, map[string]string{"list-sessions": "", "list-windows": ""})
+	m := New(&fakeViewport{}, store)
+	if !strings.Contains(m.View(), "state read-only: corrupt") {
+		t.Fatalf("rail did not display startup corruption: %q", m.View())
+	}
+	if err := m.createGroup("work"); err == nil {
+		t.Fatal("write through corrupt Store succeeded")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != string(original) {
+		t.Fatalf("corrupt primary changed: %q err=%v", got, readErr)
+	}
+	if len(m.groups) != 0 {
+		t.Fatalf("failed write changed local groups: %+v", m.groups)
 	}
 }
 
@@ -214,7 +234,7 @@ func TestCorruptStateFileDegradesToNoGroups(t *testing.T) {
 func TestDeleteGroupKeepsSessions(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\n",
+		"list-sessions": "api\t0\t\t\n",
 		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\n",
 	})
 	m := &railModel{vp: &fakeViewport{}, collapsed: map[string]bool{},
@@ -262,7 +282,7 @@ func TestActivatingAGroupFoldsItFromKeyboardAndMouse(t *testing.T) {
 	// and silently replaces the developer's own groups.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\n",
+		"list-sessions": "api\t0\t\t\n",
 		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\n",
 	})
 	vp := &fakeViewport{}
@@ -319,7 +339,7 @@ func TestPointRowRefusesGroups(t *testing.T) {
 func TestFoldStateSurvivesRestart(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\n",
+		"list-sessions": "api\t0\t\t\n",
 		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\n",
 	})
 	groups := []Group{{Name: "dev", Members: []string{"tmux:api"}}}
@@ -362,5 +382,39 @@ func TestOnlyFoldedKeysAreWritten(t *testing.T) {
 	}
 	if i, j := strings.Index(string(b), `"a"`), strings.Index(string(b), `"b"`); i < 0 || j < 0 || i > j {
 		t.Errorf("fold keys not written in sorted order: %s", b)
+	}
+}
+
+// TestRailConflictAdoptsDiskAndReportsUncommittedChange verifies the TUI
+// conflict path rather than only Store's error contract.
+func TestRailConflictAdoptsDiskAndReportsUncommittedChange(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/ghostmux/groups.json"
+	first, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFakeRunner(t, map[string]string{"list-sessions": "", "list-windows": ""})
+	m := New(&fakeViewport{}, first)
+	if err := external.Update(func(doc *state.Document) error {
+		doc.Groups = []state.Group{{Name: "external"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = m.createGroup("local")
+	if err == nil || err.Error() != "state changed in another panel; change not saved" {
+		t.Fatalf("conflict error = %v", err)
+	}
+	if len(m.groups) != 1 || m.groups[0].Name != "external" {
+		t.Fatalf("rail did not adopt external snapshot: %+v", m.groups)
+	}
+	if len(m.rows) == 0 || !m.rows[0].isGroup || m.rows[0].label != "external" {
+		t.Fatalf("rows were not rebuilt from external snapshot: %+v", m.rows)
 	}
 }

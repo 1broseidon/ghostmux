@@ -1,86 +1,121 @@
 # ghostmux
 
-Attach-anywhere mission control for your multiplexers.
+ghostmux is the tmux fleet navigator: a standalone panel that shows every tmux session — running or not — in one always-visible rail beside an embedded terminal viewport.
 
-## The idea
+It exists for terminals you stop watching. Agents, builds, and long jobs run in tmux sessions; the rail shows one line of ambient attention for all of them while you work in the viewport, and one key jumps you to the oldest thing that finished while you weren't looking. It is all inside your terminal — no desktop app, no browser, and it works over ssh.
 
-Type `ghostmux`. You're in the hub: a persistent rail listing every tmux
-session with a live attention gutter, beside a viewport that renders
-whatever you select as a live nested client. The rail never moves —
-selection re-points the viewport, never you.
+tmux keeps everything that makes it worth using: persistence, session truth, its own keymap. ghostmux owns only the frame, and adds the three things tmux itself doesn't have:
 
-The hub is **itself a tmux session**. That one decision carries the whole
-product:
-
-- **Attach from anywhere.** ghostty on Linux, iTerm2 over ssh, a bare VT —
-  the cockpit is identical everywhere, because the entire control surface
-  lives in the multiplexer, never in the terminal. Disconnect, reconnect,
-  and it's exactly as you left it: layout, viewport lock, cursor and all.
-- **Your sessions stay pristine.** All chrome lives in the `hub` session.
-  Unlike sidebar plugins that inject UI panes into your working sessions,
-  ghostmux never touches them — your layouts, snapshots, and scripts see
-  only what you made.
-- **Multi-client sane.** Viewing a session that's attached elsewhere (an
-  ssh client, another window) goes through a transient grouped session:
-  independent size and focus, the other client never feels you looking.
-
-Two laws govern the design. **Evidence, never inference**: the rail renders
-only what it can observe — a bell that rang, a command that exited, output
-you haven't seen — and never animates a claim it can't prove. **The purist
-test**: a feature ships only if the multiplexer alone can't give it to you.
-
-## Commands
-
-- **`ghostmux`** — the hub (create or attach). This is the product.
-- **`up <name> [dir]`** — attach a named session in place, creating on
-  demand; switches clients instead of nesting when already inside tmux.
-- **`ls`** — list sessions. `doctor` — diagnose the environment.
-- **`rail once|idle|help`** — hub internals; `rail once --marks` is the
-  machine-readable fleet state.
-
-## Inside the hub
-
-- **Keymap:** `j/k`/`↓↑` move · `g`/`G` first/last · `↵` view in viewport ·
-  `tab` collapse/expand · `n` new session · `x` kill (`y`/`n` confirm) ·
-  `/` filter · `r` refresh · `d` detach the viewport · `?` help ·
-  `q` quit (tears down the hub). Mouse: click to focus panes, click a row
-  to select, click again to view, wheel to scroll.
-- **`prefix None` on the hub session** — `ctrl+b` passes straight through
-  to the inner session's tmux. Single prefix everywhere.
-- **Gutter:** `●` bell · `✓` done (foreground command exited to a shell
-  while unwatched) · `~` activity · `▸` in the viewport. Session rows
-  aggregate the highest-priority mark; viewed rows show no marks (you're
-  looking at them). Title row totals what wants you (`●2 ✓1`).
-- **One kind of session.** Agent-ness is ambient: a slot whose foreground
-  command is a recognized agent CLI (`claude`, `codex`, `aider`, ...)
-  renders in the agent accent. Observed, never declared.
-
-## Ghostty extras (optional)
-
-For ghostty users, `ghostmux ghostty install` wires one nav keymap across
-all three layers: `ctrl+h/j/k/l` moves between ghostty splits, tmux panes,
-and vim windows — ghostty consumes a chord only when it can actually move
-(`performable:`), otherwise it falls through. `ghostmux ghostty uninstall`
-reverts. Marker-delimited, reversible, and entirely optional: nothing in
-the hub depends on ghostty.
+- **The ambient fleet.** The rail stays up beside your work. Bells, finished commands, and activity in every other session are visible without asking.
+- **Dead slots.** A grouped session that stops becomes a ghost row (`○`) — a declared workspace with a remembered name and directory. `Enter` brings it back. `tmux choose-tree` structurally cannot list what isn't running.
+- **The Return Queue.** `]` jumps the viewport to the oldest window that rang (`●`) or finished (`✓`) unseen, ordered by tmux's own activity timestamps. Viewing drains it; repeated presses walk the queue empty.
 
 ## Requirements
 
-tmux >= 3.2, Go 1.24+ to build (`go build -o ghostmux ./cmd/ghostmux`).
-Any terminal.
+- An interactive terminal
+- `tmux` on `PATH`
+- Go 1.26.4 to build or install from source
 
-## Roadmap
+## Install
 
-- **Multi-backend** (v0.2 prototype shipped): zellij sessions appear in
-  the rail beside tmux — honestly degraded to what zellij proves (name +
-  EXITED state; no attached dot, no tree, no marks), viewable in the
-  viewport and killable with `x`. Next: create-flow routing, the formal
-  `Backend` interface, zellij state-export plugin for tree depth, screen.
-- Go tmux control-mode (`-CC`) client library; event refresh migrates off
-  hooks/wait-for.
-- Deeper evidence for the gutter (output sampling, OSC 133 / terminal
-  progress reporting where available) — held to the evidence law.
-- Rail rename-in-place; `ctrl+o/i` jump list.
-- termtile X11 focus integration (session → window mapping via
-  `client_tty`), and a ghostty scripting-API adapter — both optional
-  integrations at the edge, like the ghostty extras.
+From a source checkout:
+
+```bash
+go install ./cmd/ghostmux
+```
+
+## Quick start
+
+```bash
+ghostmux doctor
+ghostmux
+```
+
+The rail starts with keyboard focus. If it is empty, press `n` to create a session. Select a row and press `Enter` to show it. Press `Right` to send input to the viewport; `l` previews a leaf first and focuses it when it is already viewed. The default `Ctrl+Alt+\` binding switches focus between the rail and viewport. With the rail focused, `q` exits ghostmux without killing any session.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `ghostmux` | Open the interactive panel. |
+| `ghostmux doctor` | Report the detected tmux, visible sessions, and stale ghostmux tmux hooks. |
+| `ghostmux ls` | List tmux sessions. |
+| `ghostmux up <name> [dir]` | Create or attach to a named tmux session. The directory defaults to your home directory; inside tmux, this switches the current client instead of nesting. |
+| `ghostmux rail once [--filter q] [--marks]` | Print one non-interactive rail frame. `--filter` marks non-matching rows; `--marks` emits `SESSION|WINDOW|flags` rows for debugging or scripts. |
+
+Use `ghostmux --help` for the top-level command summary.
+
+## Panel keys
+
+These keys apply while the rail has focus. Press `?` in the panel for the complete current keymap.
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `Down` / `Up` | Move through the rail. |
+| `Enter` | View a live session, fold a group, or start a ghost. |
+| `h` / `l` | Collapse a structural row or move to its parent; expand, preview a live leaf, or focus an already-viewed one. |
+| `Right` | Focus the viewport unconditionally. |
+| `` ` `` | Toggle back to the previous session and exact window. |
+| `]` | Return Queue: view the oldest unseen `●`/`✓` window. |
+| `Ctrl+Alt+\` | Switch focus between rail and viewport. |
+| `n` | Create a tmux session. |
+| `a`, `m`, `J` / `K`, `u` | Create a group, preview an organization move, move immediately, or undo the last organization change. |
+| `S` | Start every dead member of a group at once. |
+| `x` | Confirm a context-specific kill, ungroup, or forget action. |
+| `/`, `d` | Filter rows, or detach the viewport client. |
+| `?`, `,`, `q` | Open help, open settings, or quit the panel. |
+
+The attention gutter uses `●` for bell, `✓` for a foreground command returning to a shell while unwatched, `~` for activity, `▸` for the viewport target, `○` for a declared session that is not running, and `?` for rows whose state could not be validated this tick. The bottom bar's attention cluster is the Return Queue's depth.
+
+## Ghosts and the Return Queue
+
+A grouped tmux session that stops becomes a ghost row. Starting it creates a new tmux session with the recorded name and working directory; ghostmux does not restore processes, windows, layout, or commands — the name and the directory are the entire promise, and the settings screen chooses whether the remembered directory is the launch directory or the last active pane's.
+
+The Return Queue is orderable because tmux proves `#{window_activity}` per window: `]` selects the unseen `●`/`✓` window with the oldest timestamp, points the viewport at it, and lets the existing clearing paths (native bell clear, `@ghostmux_done` clear-on-view) remove it from the queue. There is no queue state to corrupt — the queue is re-derived from evidence every tick, and a fold never hides a queue entry.
+
+## State and settings
+
+Groups and user settings share one JSON state file:
+
+- `$XDG_STATE_HOME/ghostmux/groups.json` when `XDG_STATE_HOME` is set
+- `$HOME/.local/state/ghostmux/groups.json` otherwise
+
+Organization changes — group creation or deletion, moves, and folds — can be undone once with `u`; a new organization change replaces that undo, and session destruction clears it.
+
+The primary file stores group order and membership, fold state, observed working directories for grouped sessions, and saved settings. New writes include schema `"version": 1`; existing unversioned files are migrated on their next successful save. Settings cover the rail/viewport toggle, rail width, additional agent command names, the ghost directory mode, and the new-session directory mode. A comma-separated `GHOSTMUX_TOGGLE` value overrides the saved toggle binding for that run. Member keys written by the retired multi-backend prototype are preserved on disk but never rendered.
+
+Writes use a persistent `groups.json.lock` process lock, atomic replacement, and a retained `groups.json.bak` containing the previous valid primary (or the initial primary on first creation). Backups are not restored automatically. Invalid, unreadable, or unsupported primary files remain unchanged and put state editing into a visible read-only mode. If the primary is missing while the backup path still exists, ghostmux blocks edits to protect that copy; restore the backup to the primary path, or remove it deliberately before saving again.
+
+## tmux integration and limitations
+
+Viewing a session that is already attached elsewhere uses a temporary `gm-view-*` grouped session so each client gets an independent view. Owned views retain one deliberate crash-only residual: if the ghostmux process dies after writing the exact `@ghostmux_view_owner` tag but before starting the attach client, that detached view can remain behind. Clean lifecycle paths retain and retry exact session-ID capabilities, but startup never sweeps `gm-view-*` names or prefixes because that could mutate an unowned session.
+
+Queries are outage-safe. If tmux becomes unavailable, the panel keeps the last validated in-process snapshot, marks its rows with `?`, suppresses stale attention and ghost actions, and retries automatically. A declaration becomes a `○` ghost only after a successful query proves it absent. Attach, summon, kill, and forget actions stay disabled for uncertain rows; destructive confirmations are revalidated immediately before execution. `ghostmux rail once` has no cache: it prints rows from a successful query and exits with an error otherwise.
+
+ghostmux leaves the global `monitor-activity` and `visual-activity` scalar options untouched. Each panel additively leases its own entries in tmux's global session- and window-hook arrays, using a private versioned refresh channel; it never selects or overwrites a fixed array index. Clean exit removes only entries whose exact canonical commands still match that panel's lease. Crash leftovers remain harmless and are reported by `ghostmux doctor`, including the exact `hook[index]` names an operator may inspect or unset; doctor also warns when an active lease is incomplete. PID status in that report is informational only because PIDs can be reused.
+
+Attention marks do not require ghostmux to enable native tmux monitoring. The fleet query tracks stable window IDs and activity timestamps per panel, while still honoring `window_activity_flag` when users enabled monitoring themselves. `@ghostmux_done` remains a per-window user option written by ghostmux.
+
+## Development
+
+Build and run the unit tests without creating a repository-root binary:
+
+```bash
+go build ./...
+go test ./...
+```
+
+The integration scripts build temporary binaries and use scratch tmux servers and isolated state directories:
+
+```bash
+bash test/gate1_preflight.sh
+bash test/panel_test.sh
+```
+
+They require tmux.
+
+## Where to go next
+
+- New users: follow the [quick start](#quick-start).
+- Regular users: review the [commands](#commands), then use the in-panel `?` overlay and `,` settings screen.
+- Contributors: use the [development checks](#development) before submitting changes.

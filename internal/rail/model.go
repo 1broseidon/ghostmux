@@ -3,6 +3,7 @@ package rail
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/1broseidon/ghostmux/internal/state"
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
@@ -26,6 +28,7 @@ const (
 	modeCreate
 	modeKillConfirm
 	modeGroup
+	modeMove
 )
 
 // killKind is what `x` would actually destroy. The key is one key, but the
@@ -39,7 +42,6 @@ const (
 	killLive killKind = iota
 	killUngroup
 	killForget
-	killDelete
 )
 
 // verb is the word the confirm prompt uses.
@@ -49,27 +51,39 @@ func (k killKind) verb() string {
 		return "ungroup"
 	case killForget:
 		return "forget"
-	case killDelete:
-		return "delete"
 	}
 	return "kill"
 }
 
-// kindOf reads what `x` on a row would destroy. A zellij ghost is asked about
-// at press time because only zellij can say whether a serialized session is
-// still behind the name (delete) or nothing is left but our own declaration
-// (forget) — and between render and keypress that can change.
+// kindOf is a pure interpretation of row provenance. Fresh exact-name
+// validation happens only after confirmation, immediately before mutation.
 func kindOf(r railRow) killKind {
 	switch {
 	case r.isGroup:
 		return killUngroup
-	case r.ghost && r.backend != "" && AuxSessionExists(r.backend, r.sess):
-		return killDelete
 	case r.ghost:
 		return killForget
+	default:
+		return killLive
 	}
-	return killLive
 }
+
+// tmuxCache retains the last successful snapshot so a query outage degrades
+// to stale rows instead of an empty rail.
+type tmuxCache struct {
+	snapshot    tmux.Snapshot
+	hasSnapshot bool
+	enabled     bool
+	lastErr     error
+}
+
+// tmuxPresent reports whether tmux is installed; injectable for tests.
+var tmuxPresent = func() bool { _, err := exec.LookPath("tmux"); return err == nil }
+
+var (
+	errBackendActionDisabled     = errNamed("backend unavailable; action disabled")
+	errTmuxExecutableUnavailable = errNamed("tmux executable not found")
+)
 
 // foldKey is the collapse-map key for a row: groups are namespaced so a group
 // and a session sharing a name never share disclosure state.
@@ -87,40 +101,48 @@ type railModel struct {
 	hub          string          // session the rail lives in — excluded from the tree
 	vp           Viewport        // where selections render (pane / embedded pty)
 	viewportDead bool            // pane was dead this tick — swap the hint line
+	viewportErr  string          // persistent typed-probe failure from Heal
 	done         *doneTracker    // per-pane command-transition tracking (D5)
+	activity     activityLedger  // stable window ID → panel-local unread state
 	attached     map[string]bool // session name → attached elsewhere
 	blinking     bool            // 400ms blink timer running (D7)
 	blinkPhase   int             // bell blink phase, mod 3 (glyph hidden on phase 2)
 
 	collapsed map[string]bool // session name → collapsed in the rail (Task 7)
 
-	mode        mode
-	filterQuery string          // active filter substring (Task 8)
-	killTarget  string          // session or group pending `x` confirmation
-	killBackend string          // backend of killTarget ("" = tmux)
-	killKind    killKind        // what `x` is about to destroy, captured at press
-	input       textinput.Model // shared prompt editor for `/` and `n` modes
+	mode         mode
+	filterQuery  string          // active filter substring (Task 8)
+	killTarget   string          // session or group pending `x` confirmation
+	killInstance string          // tmux #{session_id} captured from the armed row
+	killKind     killKind        // what `x` is about to destroy, captured at press
+	input        textinput.Model // shared prompt editor for `/` and `n` modes
 
-	errMsg   string    // last action error, shown on the hint line
-	errUntil time.Time // errMsg clears once time.Now() passes this
+	errMsg    string    // last action error, shown on the hint line
+	errUntil  time.Time // errMsg clears once time.Now() passes this
+	infoMsg   string    // last successful/neutral action, shown for two seconds
+	infoUntil time.Time
 
-	// selfAux is the rail's own host session on a non-tmux backend (the tmux
-	// equivalent is `hub`). A frame running inside a multiplexer must not list
-	// its own host: selecting it would render the frame inside itself.
-	selfAux, selfAuxBackend string
+	tmuxCache tmuxCache
 
-	createBackend string // backend the `n` prompt will create on ("" = tmux)
+	// store is shared with the frame's settings model. storageErr remains visible
+	// while a primary that failed to load keeps the Store read-only.
+	store      railStore
+	storageErr string
 
-	// groups is the only rail state not rediscovered from the multiplexers:
-	// user intent, loaded once and written back on every change.
-	groups []Group
+	// groups is persisted organization. A modal move renders move.draft without
+	// assigning that draft here; organizationUndo is one level and has no redo.
+	groups           []Group
+	move             *moveState
+	organizationUndo *organizationUndo
 
 	// dirs is the observed working directory of each grouped member, memberKey
 	// → path. Evidence, recorded while the session is alive, so that when it
 	// dies the ghost can say where it will come back.
 	dirs map[string]string
 
-	lastViewed string // "sess:win" the cursor last auto-followed the viewport to
+	lastViewed   viewRef // exact backend/session/window last followed by the cursor
+	currentView  viewRef // latest non-idle viewport session, including its window
+	previousView viewRef // prior backend-qualified session for the backtick toggle
 }
 
 // Model is the rail's public face for composition: the solo frame embeds it
@@ -128,47 +150,42 @@ type railModel struct {
 // classic runs.
 type Model = railModel
 
-// New builds a rail model over a Viewport. The frame owns layout and chrome;
-// the rail owns rows, marks, modes and keys. Use InHost to exclude the session
-// the frame itself is running inside, if any.
-func New(vp Viewport) Model {
-	groups, collapsed, dirs := loadState()
-	m := Model{vp: vp, groups: groups, collapsed: collapsed, dirs: dirs, done: newDoneTracker()}
-	m.rows = applyGroups(railRows("", ViewState{}), m.groups, m.dirs)
+// New builds a rail model over a Viewport and Store. The optional form keeps
+// internal callers compatible while opening one default Store for that model.
+func New(vp Viewport, stores ...*state.Store) Model {
+	var store *state.Store
+	if len(stores) > 0 {
+		store = stores[0]
+	}
+	var openErr error
+	if store == nil {
+		store, openErr = state.OpenDefault()
+	}
+	groups, collapsed, dirs := railState(store.Snapshot())
+	m := Model{
+		vp: vp, store: store, groups: groups, collapsed: collapsed, dirs: dirs,
+		done: newDoneTracker(),
+	}
+	if openErr != nil || store.LoadError() != nil {
+		m.storageErr = "state read-only: " + store.Info().Status
+	}
+	// Bootstrap both caches without done marks, directory writes, or viewport
+	// synchronization. The first regular tick owns those side effects.
+	m.refreshState(false)
 	return m
 }
 
-// InHost tells the rail which multiplexer session it is itself running inside
-// (backend "" = tmux), so it never lists — or nests into — its own host. A
-// standalone frame is stateless: everything it shows is rediscovered from the
-// muxes each tick, so it can simply be relaunched anywhere. Running it inside
-// a session is how it gets resume for free, and this is what makes that safe.
-func (m Model) InHost(backend, sess string) Model {
+// InHost tells the rail which tmux session it is itself running inside, so it
+// never lists — or nests into — its own host. Live tmux data is rediscovered
+// and saved organization comes from Store, so a frame can be relaunched
+// anywhere. Excluding its host keeps that relaunch safe.
+func (m Model) InHost(sess string) Model {
 	if sess == "" {
 		return m
 	}
-	if backend == "" {
-		m.hub = sess
-	} else {
-		m.selfAux, m.selfAuxBackend = sess, backend
-	}
-	m.rows = applyGroups(railRows(m.hub, ViewState{}), m.groups, m.dirs)
+	m.hub = sess
+	m.rebuildRows()
 	return m
-}
-
-// visibleAux drops the rail's own host from the aux session list.
-func (m railModel) visibleAux(aux []auxSession) []auxSession {
-	if m.selfAux == "" {
-		return aux
-	}
-	out := aux[:0:0]
-	for _, a := range aux {
-		if a.backend == m.selfAuxBackend && a.name == m.selfAux {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
 }
 
 func railTicker() tea.Cmd {
@@ -189,13 +206,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case railTick:
 		m.refresh()
-		m.viewportDead = m.vp.Heal()
+		m.healViewport()
 		m.clamp()
 		debugRefresh("tick")
 		return m, tea.Batch(railTicker(), m.maybeBlink())
 	case refreshMsg:
 		m.refresh()
-		m.viewportDead = m.vp.Heal()
+		m.healViewport()
 		m.clamp()
 		debugRefresh("event")
 		return m, m.maybeBlink()
@@ -210,6 +227,9 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case tea.MouseMsg:
+		if m.mode == modeMove {
+			return m, nil
+		}
 		return m.updateMouse(msg)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
@@ -224,6 +244,8 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateKillConfirmKey(msg)
 		case modeGroup:
 			return m.updateGroupKey(msg)
+		case modeMove:
+			return m.updateMoveKey(msg)
 		default:
 			return m.updateNormalKey(msg)
 		}
@@ -246,22 +268,9 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(1)
 	case "k", "up":
 		m.moveCursor(-1)
-	case "g":
-		m.cursor = 0
-	case "G":
-		m.cursor = len(m.visible()) - 1
-		m.clamp()
-	case "r":
-		m.refresh()
-		m.clamp()
-		return m, m.maybeBlink()
 	case "enter":
 		if vis := m.visible(); m.cursor < len(vis) {
 			m.activateRow(vis[m.cursor])
-		}
-	case "tab":
-		if vis := m.visible(); m.cursor < len(vis) {
-			m.toggleFold(vis[m.cursor])
 		}
 	case "a":
 		// Name the shelf before you fill it: empty groups are legal.
@@ -269,6 +278,12 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input = newPromptInput()
 		m.errMsg = ""
 		return m, textinput.Blink
+	case "m":
+		m.startMove()
+	case "u":
+		if err := m.undoOrganization(); err != nil {
+			m.flashError(err)
+		}
 	case "J", "K":
 		dir := 1
 		if msg.String() == "K" {
@@ -277,35 +292,41 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.moveRow(dir); err != nil {
 			m.flashError(err)
 		}
-	case "l", "right":
+	case "h":
+		m.semanticLeft()
+	case "l":
+		m.semanticRight()
+	case "right":
 		m.vp.FocusViewport()
+	case "`":
+		m.viewPrevious()
+	case "]":
+		m.returnOldest()
 	case "d":
 		m.vp.Detach()
+		m.flashInfo("viewport detached")
 		m.refresh()
 	case "n":
-		return m.startCreate("")
-	case "z":
-		// One key per multiplexer beats a picker: `n` is the default (tmux),
-		// `z` is zellij. Nothing to discover, nothing to cycle. `z` simply
-		// isn't offered when zellij isn't installed.
-		if !zellijPresent {
-			m.flashError(fmt.Errorf("zellij not installed"))
-			return m, nil
-		}
-		return m.startCreate("zellij")
+		return m.startCreate()
 	case "x":
 		if vis := m.visible(); m.cursor < len(vis) {
-			r := vis[m.cursor]
+			row := vis[m.cursor]
+			if !row.isGroup && row.validity != rowFresh {
+				m.flashError(errBackendActionDisabled)
+				return m, nil
+			}
 			m.mode = modeKillConfirm
-			m.killTarget = r.sess
-			m.killBackend = r.backend
-			m.killKind = kindOf(r)
+			m.killTarget = row.sess
+			m.killInstance = row.instanceID
+			m.killKind = kindOf(row)
 			m.errMsg = ""
 		}
 	case "S":
 		// The fleet verb: one press brings a whole declared workspace back.
 		if vis := m.visible(); m.cursor < len(vis) {
-			m.summonGroup(vis[m.cursor])
+			if err := m.summonGroup(vis[m.cursor]); err != nil {
+				m.flashError(err)
+			}
 		}
 	case "/":
 		m.mode = modeFilter
@@ -368,9 +389,8 @@ func (m railModel) updateCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		name := m.input.Value()
-		backend := m.createBackend
 		m.mode = modeNormal
-		if err := m.createSession(name, backend); err != nil {
+		if err := m.createSession(name); err != nil {
 			m.flashError(err)
 		}
 		return m, nil
@@ -399,36 +419,153 @@ func (m railModel) updateGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// startMove normalizes any window to its backend-qualified session and starts
+// a state-only draft. Liveness is deliberately irrelevant: declarations and
+// stale rows remain organizable without a backend action.
+func (m *railModel) startMove() {
+	vis := m.visible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		m.flashInfo("nothing to move")
+		return
+	}
+	row := vis[m.cursor]
+	target, ok := organizationTargetOf(row)
+	if !ok {
+		m.flashInfo("row cannot move")
+		return
+	}
+	label := row.sess
+	if row.isGroup {
+		label = row.label
+	}
+	original := cloneGroups(m.groups)
+	m.move = &moveState{
+		target: target, original: original, draft: cloneGroups(original), label: label,
+		cursor: cursorIdentityOf(row),
+	}
+	m.mode = modeMove
+	m.restoreCursor(targetCursorIdentity(target))
+}
+
+// updateMoveKey previews any number of pure one-step moves. Enter performs at
+// most one Store update; Esc discards the draft without writing.
+func (m railModel) updateMoveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.move == nil {
+		m.mode = modeNormal
+		m.rebuildRows()
+		return m, nil
+	}
+	switch msg.String() {
+	case "j", "down", "J":
+		m.previewMove(1)
+	case "k", "up", "K":
+		m.previewMove(-1)
+	case "esc":
+		target := m.move.target
+		m.mode, m.move = modeNormal, nil
+		m.rebuildRows()
+		m.restoreCursor(targetCursorIdentity(target))
+	case "enter":
+		move := m.move
+		target, label := move.target, move.label
+		if !move.dirty {
+			m.mode, m.move = modeNormal, nil
+			m.rebuildRows()
+			m.restoreCursor(targetCursorIdentity(target))
+			m.flashInfo("not moved · " + label)
+			return m, nil
+		}
+		snapshot := snapshotOrganization(move.original, m.collapsed, move.cursor)
+		candidate := cloneGroups(move.draft)
+		if err := m.persistRail(candidate, m.collapsed, m.dirs); err != nil {
+			// Conflict already exited and rebuilt from the external snapshot.
+			// Other errors discard only the draft and restore persisted display.
+			if m.mode == modeMove {
+				m.mode, m.move = modeNormal, nil
+				m.rebuildRows()
+				m.restoreCursor(targetCursorIdentity(target))
+			}
+			m.flashError(err)
+			return m, nil
+		}
+		m.registerOrganizationUndo(snapshot, "move "+label)
+		m.mode, m.move = modeNormal, nil
+		m.refreshWithoutCapture()
+		m.restoreCursor(targetCursorIdentity(target))
+		m.flashInfo("moved · " + label + " · u undo")
+	}
+	return m, nil
+}
+
+func (m *railModel) previewMove(dir int) {
+	if m.move == nil {
+		return
+	}
+	draft, changed := moveOrganization(m.move.draft, m.move.target, dir)
+	if !changed {
+		return
+	}
+	m.move.draft = draft
+	m.move.dirty = !groupsEqual(m.move.original, draft)
+	m.rebuildRows()
+	m.restoreCursor(targetCursorIdentity(m.move.target))
+}
+
 // updateKillConfirmKey handles the y/n confirmation after `x` (Task 9).
 func (m railModel) updateKillConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
-		target, backend, kind := m.killTarget, m.killBackend, m.killKind
+		target, instance, kind := m.killTarget, m.killInstance, m.killKind
 		m.mode = modeNormal
-		m.killTarget, m.killBackend, m.killKind = "", "", killLive
+		m.killTarget, m.killInstance, m.killKind = "", "", killLive
+		if kind != killUngroup {
+			if err := validateDestructiveAction(kind, target, instance); err != nil {
+				// Rebuild from a fresh query, but do not let a cancelled
+				// destructive action trigger done/dir/window side effects.
+				m.refreshWithoutCapture()
+				m.flashError(err)
+				return m, nil
+			}
+		}
 		var err error
 		switch kind {
 		case killUngroup:
 			err = m.deleteGroup(target)
 		case killForget:
-			// Nothing to kill: the session is already gone. All that is left is
-			// our own declaration, so `x` on a ghost prunes the state file —
-			// which is how it stops accumulating names you can no longer see.
-			m.forgetMember(memberKey(backend, target))
+			err = m.forgetMember(memberKey(target))
 			m.refresh()
-		case killDelete:
-			err = m.deleteGhost(target, backend)
 		default:
-			err = m.killSession(target, backend)
+			err = m.killSessionInstance(target, instance)
 		}
 		if err != nil {
 			m.flashError(err)
 		}
 	case "n", "esc":
 		m.mode = modeNormal
-		m.killTarget = ""
+		m.killTarget, m.killInstance, m.killKind = "", "", killLive
 	}
 	return m, nil
+}
+
+// validateDestructiveAction performs the fresh exact-name check required after
+// confirmation and immediately before any tmux command or state mutation.
+func validateDestructiveAction(kind killKind, name, armedInstance string) error {
+	present, currentInstance, err := tmux.ProbeSessionInstance(name)
+	if err != nil {
+		return fmt.Errorf("tmux unavailable: %w", err)
+	}
+
+	valid := false
+	switch kind {
+	case killLive:
+		valid = present && armedInstance != "" && currentInstance == armedInstance
+	case killForget:
+		valid = !present
+	}
+	if !valid {
+		return fmt.Errorf("session state changed; %s cancelled", kind.verb())
+	}
+	return nil
 }
 
 // updateMouse handles clicks and wheel scroll now that the rail owns mouse
@@ -504,10 +641,168 @@ func (m *railModel) moveCursor(step int) {
 	}
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (m *railModel) movePage(delta int) {
+	vis := m.visible()
+	m.cursor = physicalMoveIndex(vis, m.cursor, delta, m.filterQuery)
+}
+
+func (m *railModel) moveNonWindow(dir int) {
+	vis := m.visible()
+	m.cursor = nonWindowMoveIndex(vis, m.cursor, dir, m.filterQuery)
+}
+
+// semanticLeft implements tree-style h: collapse an open structural row,
+// otherwise move to the nearest visible parent.
+func (m *railModel) semanticLeft() {
+	vis := m.visible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return
+	}
+	r := vis[m.cursor]
+	// Collapse and parent selection are organization-only. They remain safe on
+	// stale or never-validated rows because neither path touches a backend.
+	if structuralRow(r) && !r.collapsed {
+		if err := m.setFold(r, true); err != nil {
+			m.flashError(err)
+		}
+		return
+	}
+	if parent := visibleParentIndex(vis, m.cursor); parent >= 0 {
+		m.cursor = parent
+	}
+}
+
+// semanticRight expands a folded structural row. On a leaf it previews the
+// exact live target, or hands focus to an already viewed target.
+func (m *railModel) semanticRight() {
+	vis := m.visible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return
+	}
+	r := vis[m.cursor]
+	// Structural expansion is state-only and does not depend on backend
+	// freshness. Validity gates only the leaf preview/focus path below.
+	if structuralRow(r) {
+		if r.collapsed {
+			if err := m.setFold(r, false); err != nil {
+				m.flashError(err)
+			}
+		}
+		return
+	}
+	if r.isGroup || r.ghost {
+		return
+	}
+	if r.validity != rowFresh {
+		m.flashError(errBackendActionDisabled)
+		return
+	}
+	if rowExactView(r, m.vp.Lock()) {
+		m.vp.FocusViewport()
+		return
+	}
+	m.pointRow(r)
+	if !rowExactView(r, m.vp.Lock()) {
+		m.flashError(errNamed("view unavailable"))
+		return
+	}
+	m.followViewport()
+	m.flashInfo("viewing " + viewTargetName(r))
+}
+
+func (m *railModel) observeViewport(lock ViewState) {
+	ref := viewRefOf(lock)
+	if ref.Sess == "" {
+		return // deliberate idle/detach retains the two-session history
+	}
+	if m.currentView.Sess == "" {
+		m.currentView = ref
+		return
+	}
+	if m.currentView.sameSession(ref) {
+		m.currentView.Win = ref.Win
+		return
+	}
+	m.previousView = m.currentView
+	m.currentView = ref
+}
+
+func (m *railModel) viewPrevious() {
+	if m.vp == nil {
+		m.flashError(errNamed("previous view unavailable"))
+		return
+	}
+	m.observeViewport(m.vp.Lock())
+	if m.previousView.Sess == "" {
+		m.flashError(errNamed("no previous session"))
+		return
+	}
+	target, resolution := resolveViewRef(m.rows, m.previousView)
+	switch resolution {
+	case viewGhost:
+		m.flashError(errNamed("previous session not live"))
+		return
+	case viewUnavailable:
+		m.flashError(errNamed("previous session unavailable"))
+		return
+	case viewMissing:
+		m.flashError(errNamed("previous view missing"))
+		return
+	}
+	requested := m.previousView
+	m.pointRow(target)
+	lock := m.vp.Lock()
+	if lock.Sess != requested.Sess {
+		m.flashError(errNamed("previous view unavailable"))
+		return
+	}
+	m.followViewport() // observes the verified change and swaps the two refs
+	m.flashInfo("previous · " + viewTargetName(target))
+}
+
+// returnOldest is the Return Queue verb: one press views the oldest window
+// that rang (●) or finished (✓) while unseen — the fleet as an inbox, drained
+// oldest-first. Viewing clears the mark through the paths that already exist
+// (native bell clear, clearViewedDone, the activity ledger), so the next
+// press walks to the next-oldest with no queue state of its own.
+func (m *railModel) returnOldest() {
+	// m.rows, not visible(): a fold hides rows from the eye, not from the
+	// queue — attention inside a collapsed group must still be reachable.
+	best := -1
+	for i, r := range m.rows {
+		if !attentionLeaf(r) || (!r.bell && !r.done) {
+			continue
+		}
+		if best < 0 || r.activityAt < m.rows[best].activityAt {
+			best = i
+		}
+	}
+	if best < 0 {
+		m.flashInfo("queue empty")
+		return
+	}
+	target := m.rows[best]
+	m.pointRow(target)
+	if !rowExactView(target, m.vp.Lock()) {
+		m.flashError(errNamed("view unavailable"))
+		return
+	}
+	m.refresh() // re-observes marks post-view and follows the viewport
+	m.flashInfo("return · " + viewTargetName(target))
+}
+
 // flashError records an action error for the hint-line flash (3s, Task 9).
 func (m *railModel) flashError(err error) {
 	m.errMsg = err.Error()
 	m.errUntil = time.Now().Add(3 * time.Second)
+	m.infoMsg, m.infoUntil = "", time.Time{}
 }
 
 // errorActive reports whether the error flash is still within its window.
@@ -515,46 +810,32 @@ func (m railModel) errorActive() bool {
 	return m.errMsg != "" && time.Now().Before(m.errUntil)
 }
 
-// startCreate opens the new-session prompt targeting one backend.
-func (m railModel) startCreate(backend string) (tea.Model, tea.Cmd) {
+// flashInfo records successful or neutral action feedback for two seconds.
+func (m *railModel) flashInfo(message string) {
+	m.errMsg, m.errUntil = "", time.Time{}
+	m.infoMsg = message
+	m.infoUntil = time.Now().Add(2 * time.Second)
+}
+
+func (m railModel) infoActive() bool {
+	return m.infoMsg != "" && time.Now().Before(m.infoUntil)
+}
+
+// startCreate opens the new-session prompt.
+func (m railModel) startCreate() (tea.Model, tea.Cmd) {
 	m.mode = modeCreate
 	m.input = newPromptInput()
-	m.createBackend = backend
 	m.errMsg = ""
 	return m, textinput.Blink
 }
 
-// backendLabel names a backend for the prompt ("" = tmux).
-func backendLabel(backend string) string {
-	if backend == "" {
-		return "tmux"
-	}
-	return backend
-}
-
-// createSession creates a session on the given backend ("" = tmux) and points
-// the viewport at it (Task 9). Exposed via the `n` key; tab cycles backends,
-// so a zellij-only box can still create — the multi-backend promise has to
-// hold for making sessions, not just for listing them.
-func (m *railModel) createSession(name, backend string) error {
+// createSession creates a tmux session and points the viewport at it (Task 9).
+func (m *railModel) createSession(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("name required")
 	}
-	if backend != "" {
-		if err := createAux(backend, name); err != nil {
-			return err
-		}
-		m.refresh()
-		m.vp.PointAux(backend, name)
-		m.refresh()
-		return nil
-	}
-	dir, err := os.UserHomeDir()
-	if err != nil || dir == "" {
-		dir = "~"
-	}
-	if err := tmux.Run("new-session", "-d", "-s", name, "-c", dir); err != nil {
+	if err := tmux.Run("new-session", "-d", "-s", name, "-c", m.createDir()); err != nil {
 		return err
 	}
 	m.refresh()
@@ -563,37 +844,60 @@ func (m *railModel) createSession(name, backend string) error {
 	return nil
 }
 
-// killSession kills a session by name; the viewport cleans up its shadow and
-// goes idle if it held the lock (Task 9, `x` key).
-func (m *railModel) killSession(name, backend string) error {
-	if backend != "" {
-		if err := killAux(backend, name); err != nil {
-			return err
+// createDir resolves where a new tmux session starts: home by default, or the
+// viewport session's proven active-pane cwd when the operator chose
+// "current". An empty lock, an unproven path, or a vanished directory all
+// fall back to home rather than failing the create.
+func (m *railModel) createDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "~"
+	}
+	if CreateDir() != CreateDirCurrent || m.vp == nil {
+		return home
+	}
+	lock := m.vp.Lock()
+	if lock.Sess == "" {
+		return home
+	}
+	for _, s := range m.tmuxCache.snapshot.Sessions {
+		if s.Name != lock.Sess || s.CurrentPath == "" {
+			continue
 		}
-		m.vp.OnKill(name, backend)
-		m.forgetMember(memberKey(backend, name))
-		m.refresh()
-		return nil
+		if _, err := os.Stat(s.CurrentPath); err == nil {
+			return s.CurrentPath
+		}
 	}
-	if err := tmux.Run("kill-session", "-t", "="+name); err != nil {
-		return err
-	}
-	m.vp.OnKill(name, "")
-	m.forgetMember(memberKey("", name))
-	m.refresh()
-	return nil
+	return home
 }
 
-// deleteGhost removes a backend's serialized session, and the declaration that
-// was pointing at it. Both, because deleting only the serialized half would
-// leave a grouped member as a pure declaration ghost — the row would still be
-// there after an `x` the user watched succeed.
-func (m *railModel) deleteGhost(name, backend string) error {
-	if err := deleteAux(backend, name); err != nil {
+// killSession is the compatibility name-targeted boundary used by direct
+// callers. Confirmed UI kills use killSessionInstance with the armed stable ID.
+func (m *railModel) killSession(name string) error {
+	return m.killSessionInstance(name, "")
+}
+
+// killSessionInstance kills the validated tmux instance by stable ID. If the
+// name is deleted and recreated after validation, the old ID is absent and the
+// command fails safely instead of targeting the replacement by name.
+func (m *railModel) killSessionInstance(name, instance string) error {
+	if instance != "" {
+		killed, err := tmux.KillSessionIfInstance(name, instance)
+		if err != nil {
+			return err
+		}
+		if !killed {
+			return fmt.Errorf("session state changed; kill cancelled")
+		}
+	} else if err := tmux.Run("kill-session", "-t", "="+name); err != nil {
 		return err
 	}
-	m.vp.OnKill(name, backend)
-	m.forgetMember(memberKey(backend, name))
+	m.invalidateOrganizationUndo()
+	m.vp.OnKill(name)
+	if err := m.forgetMember(memberKey(name)); err != nil {
+		m.refresh()
+		return err
+	}
 	m.refresh()
 	return nil
 }
@@ -603,48 +907,175 @@ func (m *railModel) deleteGhost(name, backend string) error {
 // needs six confirmations is not the one keystroke this is supposed to be.
 // The viewport is left alone: S is about the fleet, not about what you are
 // looking at. On any other row it does nothing; ↵ already says it better.
-func (m *railModel) summonGroup(r railRow) {
+func (m *railModel) summonGroup(r railRow) error {
 	if !r.isGroup {
-		return
+		return nil
 	}
+	var failures []string
+	uncertain := 0
 	// m.rows, not visible(): a folded group is still a fleet, and S must not
 	// mean something different depending on a disclosure triangle.
 	for _, row := range m.rows {
-		if !row.ghost || row.isGroup || row.group != r.label {
+		if row.isGroup || row.isWin || row.group != r.label {
 			continue
 		}
-		if row.backend != "" {
-			// One call covers both zellij ghosts: on a session zellij still
-			// lists as EXITED, `attach --create-background` resurrects it
-			// (verified) — on a name it has forgotten, it creates it. Neither
-			// needs a client, so S never steals the viewport.
-			createAux(row.backend, row.sess)
+		if row.validity != rowFresh {
+			uncertain++
+			continue
+		}
+		if !row.ghost {
 			continue
 		}
 		dir, _ := summonDir(row.dir)
-		// A member that will not start stays a ghost and says so on its own
-		// row; one failure must not abort the rest of the fleet.
-		tmux.Run("new-session", "-d", "-s", row.sess, "-c", dir)
+		if err := tmux.Run("new-session", "-d", "-s", row.sess, "-c", dir); err != nil {
+			failures = append(failures, row.sess+": "+err.Error())
+		}
 	}
 	m.refresh()
+	if uncertain > 0 {
+		failures = append(failures, fmt.Sprintf("skipped %d uncertain member(s)", uncertain))
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("group start: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
-// refresh reloads the fleet, runs done-tracking, and rebuilds the rows. It is
-// the shared body of both the 1s tick (fallback + transition sampler, D6) and
-// the event-driven refreshMsg.
-func (m *railModel) refresh() {
-	sessions := tmux.Sessions()
-	windows := tmux.Windows()
-	m.attached = attachedMap(sessions)
-	if m.done != nil {
-		m.done.observe(windows, m.hub, m.suppressDone)
+// refresh queries each installed backend independently, retains failed
+// backends' last successful snapshots, and runs tmux side effects only from a
+// candidate that succeeded on this refresh.
+func (m *railModel) refresh() { m.refreshState(true) }
+
+// refreshWithoutCapture is a side-effect-free fleet rebuild. It is used after
+// state conflicts and cancelled destructive validations.
+func (m *railModel) refreshWithoutCapture() { m.refreshState(false) }
+
+func (m *railModel) refreshState(sideEffects bool) {
+	tmuxFresh := m.refreshTmuxCache()
+	moving := m.mode == modeMove && m.move != nil
+
+	if tmuxFresh {
+		snapshot := m.tmuxCache.snapshot
+		m.attached = attachedMap(snapshot.Sessions)
+		if sideEffects {
+			if m.done != nil {
+				m.done.observe(snapshot.Windows, snapshot.Sessions, m.hub, m.suppressDone)
+			}
+			// Moving is a state-only transaction. Ticks may update backend
+			// evidence, but must not introduce a Store write into its preview.
+			if !moving {
+				m.captureDirs(snapshot.Sessions)
+			}
+			if m.vp != nil {
+				m.vp.SyncActiveWindow(snapshot.Windows)
+			}
+		}
 	}
-	m.captureDirs(sessions)
-	m.vp.SyncActiveWindow(windows)
-	m.rows = buildRows(m.hub, m.vp.Lock(), sessions, windows)
-	m.rows = append(m.rows, auxRows(m.visibleAux(auxSessions()), m.vp.Lock())...)
-	m.rows = applyGroups(m.rows, m.groups, m.dirs)
+	m.rebuildRows()
+	if moving {
+		m.restoreCursor(targetCursorIdentity(m.move.target))
+		return // never auto-follow the viewport away from the moved target
+	}
 	m.followViewport()
+}
+
+func (m *railModel) refreshTmuxCache() bool {
+	installed := tmuxPresent()
+	if !installed {
+		m.done.reset()
+		if !m.tmuxCache.hasSnapshot {
+			// Initial not-installed is a disabled backend, not an outage.
+			m.tmuxCache.enabled = false
+			m.tmuxCache.lastErr = nil
+			return false
+		}
+		// A backend that previously succeeded remains enabled as a stale cache.
+		// This distinguishes executable disappearance from initial absence and
+		// lets the next successful lookup recover normally.
+		m.tmuxCache.enabled = true
+		m.tmuxCache.lastErr = errTmuxExecutableUnavailable
+		return false
+	}
+	m.tmuxCache.enabled = true
+	snapshot, err := tmux.Query()
+	if err != nil {
+		m.tmuxCache.lastErr = err
+		m.done.reset()
+		return false
+	}
+	m.observeActivity(snapshot.Windows)
+	m.tmuxCache.snapshot = snapshot
+	m.tmuxCache.hasSnapshot = true
+	m.tmuxCache.lastErr = nil
+	return true
+}
+
+func (m railModel) tmuxValidity() rowValidity {
+	if !m.tmuxCache.enabled || !m.tmuxCache.hasSnapshot {
+		return rowUnvalidated
+	}
+	if m.tmuxCache.lastErr != nil {
+		return rowStale
+	}
+	return rowFresh
+}
+
+func (m *railModel) rebuildRows() {
+	lock := ViewState{}
+	if m.vp != nil {
+		lock = m.vp.Lock()
+	}
+	groups := m.groups
+	if m.mode == modeMove && m.move != nil {
+		groups = m.move.draft
+	}
+	var rows []railRow
+	if m.tmuxCache.enabled && m.tmuxCache.hasSnapshot {
+		snapshot := m.tmuxCache.snapshot
+		rows = stampValidity(buildRows(m.hub, lock, snapshot.Sessions, snapshot.Windows), m.tmuxValidity())
+	}
+	m.rows = applyGroups(rows, groups, m.dirs, m.tmuxValidity())
+}
+
+// backendStatus is persistent while an enabled query or viewport probe is
+// failing. It clears on the next successful refresh.
+func (m railModel) backendStatus() string {
+	var status []string
+	if m.tmuxCache.enabled && m.tmuxCache.lastErr != nil {
+		text := "tmux unavailable"
+		if m.tmuxCache.hasSnapshot {
+			text += "; showing last snapshot"
+		}
+		status = append(status, text)
+	}
+	if m.viewportErr != "" {
+		duplicate := false
+		for _, existing := range status {
+			if strings.HasPrefix(existing, strings.TrimSuffix(m.viewportErr, ":")) ||
+				strings.HasPrefix(m.viewportErr, strings.Fields(existing)[0]+" unavailable") {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			status = append(status, m.viewportErr)
+		}
+	}
+	return strings.Join(status, " · ")
+}
+
+func (m *railModel) healViewport() {
+	if m.vp == nil {
+		m.viewportDead, m.viewportErr = false, ""
+		return
+	}
+	dead, err := m.vp.Heal()
+	m.viewportDead = dead
+	if err != nil {
+		m.viewportErr = err.Error()
+		return
+	}
+	m.viewportErr = ""
 }
 
 // captureDirs records where each grouped tmux session is actually running. It
@@ -653,60 +1084,77 @@ func (m *railModel) refresh() {
 // has to write. Only grouped members are recorded: an ungrouped session is
 // cattle, and remembering its dir would be storage nobody asked for.
 //
-// zellij members never get a dir. The zellij CLI proves no working directory,
-// and inventing one would be exactly the inference this rail refuses.
+// Which path is evidence depends on Settings.GhostDir: launch (default) uses
+// #{session_path}; last uses the active pane's #{pane_current_path}. An empty
+// observation never clears a previously recorded dir.
 func (m *railModel) captureDirs(sessions []tmux.Session) {
+	dirs := cloneDirs(m.dirs)
 	changed := false
-	for _, s := range sessions {
-		if s.Path == "" {
+	last := GhostDir() == GhostDirLast
+	for _, session := range sessions {
+		path := session.Path
+		if last {
+			path = session.CurrentPath
+		}
+		if path == "" {
 			continue
 		}
-		key := memberKey("", s.Name)
-		if groupOf(m.groups, key) == "" {
+		key := memberKey(session.Name)
+		if groupOf(m.groups, key) == "" || dirs[key] == path {
 			continue
 		}
-		if m.dirs[key] == s.Path {
-			continue
-		}
-		if m.dirs == nil {
-			m.dirs = map[string]string{}
-		}
-		m.dirs[key] = s.Path
+		dirs[key] = path
 		changed = true
 	}
-	// One write per refresh at most: this runs on a 1s tick, so a save per
-	// changed member would rewrite the state file several times a second.
 	if changed {
-		m.saveState()
+		if err := m.persistRail(m.groups, m.collapsed, dirs); err != nil {
+			m.flashError(err)
+		}
 	}
 }
 
 // followViewport moves the rail cursor to the row the viewport is showing,
-// once per viewed-window change — so ctrl+b navigation in the viewport
-// scrolls/highlights the rail live, while leaving the cursor alone when the
-// user is browsing other rows with j/k.
+// once per backend-qualified viewed-window change. Inner tmux window changes
+// update the current exact ref without replacing previous-session history.
 func (m *railModel) followViewport() {
+	if m.vp == nil {
+		return
+	}
 	lock := m.vp.Lock()
+	m.observeViewport(lock)
 	if lock.Sess == "" {
-		m.lastViewed = ""
 		return
 	}
-	key := lock.Sess + ":" + lock.Win
-	if key == m.lastViewed {
+	ref := viewRefOf(lock)
+	if ref == m.lastViewed {
 		return
 	}
-	m.lastViewed = key
+	m.lastViewed = ref
+
 	best := -1
+	targetGroup := ""
+	for _, r := range m.rows {
+		if !r.isGroup && r.sess == lock.Sess {
+			targetGroup = r.group
+			break
+		}
+	}
 	for i, r := range m.visible() {
+		if r.isGroup {
+			if targetGroup != "" && r.label == targetGroup {
+				best = i // a folded group stands in for its hidden viewed member
+			}
+			continue
+		}
 		if r.sess != lock.Sess {
 			continue
 		}
-		if r.flat || (r.depth == 1 && r.window == lock.Win) {
+		if (r.isWin || r.flat) && r.window == lock.Win {
 			best = i
 			break
 		}
-		if r.depth == 0 {
-			best = i // session row stands in when its windows are collapsed
+		if !r.isWin {
+			best = i // a collapsed session stands in for its hidden window
 		}
 	}
 	if best >= 0 {
@@ -720,7 +1168,13 @@ func (m *railModel) followViewport() {
 // used to try attaching to a session named after it.
 func (m *railModel) activateRow(r railRow) {
 	if r.isGroup {
-		m.toggleFold(r)
+		if err := m.toggleFold(r); err != nil {
+			m.flashError(err)
+		}
+		return
+	}
+	if r.validity != rowFresh {
+		m.flashError(errBackendActionDisabled)
 		return
 	}
 	// A ghost has nothing to attach to yet, so ↵ means summon. It routes
@@ -738,32 +1192,23 @@ func (m *railModel) activateRow(r railRow) {
 }
 
 // summonRow brings a declared-but-dead name back. Nothing here is a restore:
-// a tmux ghost becomes a NEW session with the declared name in the recorded
-// dir — which is the whole of what the row was claiming — and a zellij ghost
-// is zellij's own resurrection, relayed. No layout replay, no command replay.
+// a ghost becomes a NEW session with the declared name in the recorded dir —
+// which is the whole of what the row was claiming. No layout replay, no
+// command replay.
 func (m *railModel) summonRow(r railRow) error {
-	if r.backend != "" {
-		// Ask the backend now rather than trusting the row: if it still lists
-		// the name (EXITED), attaching IS the resurrection and creating would
-		// be wrong; if it has forgotten the name entirely, only the
-		// declaration is left and a fresh session is what we owe the user.
-		if !AuxSessionExists(r.backend, r.sess) {
-			if err := createAux(r.backend, r.sess); err != nil {
-				return err
-			}
-			m.refresh()
-		}
-		m.vp.PointAux(r.backend, r.sess)
-		return nil
+	if r.validity != rowFresh {
+		return errBackendActionDisabled
 	}
 	dir, gone := summonDir(r.dir)
 	if err := tmux.Run("new-session", "-d", "-s", r.sess, "-c", dir); err != nil {
 		// A name that already exists is not a failure here: the session sprang
-		// to life between the render and the keypress, which is the outcome we
-		// were after. Ask tmux instead of reading the message — exec hands us
-		// "exit status 1" and keeps tmux's own words ("duplicate session: api")
-		// on stderr, where a text match would never see them.
-		if !sessionExists(r.sess) {
+		// to life between render and keypress. Probe through the typed boundary
+		// so backend failure cannot masquerade as authoritative absence.
+		present, probeErr := tmux.ProbeSession(r.sess)
+		if probeErr != nil {
+			return fmt.Errorf("tmux unavailable: %w", probeErr)
+		}
+		if !present {
 			return err
 		}
 	}
@@ -794,22 +1239,13 @@ func summonDir(dir string) (string, bool) {
 	return dir, false
 }
 
-// sessionExists asks tmux whether a session is there right now.
-func sessionExists(name string) bool {
-	return tmux.Run("has-session", "-t", "="+name) == nil
-}
-
-// pointRow routes a row selection to the right backend's viewport attach.
+// pointRow routes a row selection to the viewport attach.
 func (m *railModel) pointRow(r railRow) {
 	if r.isGroup {
 		return // a group is a shelf: there is nothing behind it to attach to
 	}
-	if r.ghost {
-		return // nothing is running behind a ghost: summon it, never attach it
-	}
-	if r.backend != "" {
-		m.vp.PointAux(r.backend, r.sess)
-		return
+	if r.ghost || r.validity != rowFresh {
+		return // no proven live process: never attach it
 	}
 	m.clearViewedDone(r)
 	m.vp.Point(r.sess, r.window, r.attached)
@@ -831,6 +1267,9 @@ func (m railModel) suppressDone(sess, window string) bool {
 // clearViewedDone clears @ghostmux_done on whatever window the user is about to
 // view: the selected window row, or a session row's active window.
 func (m railModel) clearViewedDone(r railRow) {
+	if r.validity != rowFresh {
+		return
+	}
 	win := r.window
 	if r.depth == 0 && win == "" {
 		win = m.activeWindowOf(r.sess)
@@ -863,7 +1302,7 @@ func (m *railModel) maybeBlink() tea.Cmd {
 // anyBell reports whether any row carries a bell mark.
 func anyBell(rows []railRow) bool {
 	for _, r := range rows {
-		if r.bell {
+		if r.validity == rowFresh && r.bell {
 			return true
 		}
 	}

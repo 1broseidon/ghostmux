@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/1broseidon/ghostmux/internal/rail"
+	"github.com/1broseidon/ghostmux/internal/state"
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
@@ -23,7 +26,7 @@ func newChromeSolo(t *testing.T) soloModel {
 	width := rail.Width()
 	t.Cleanup(func() { rail.SetWidth(width) })
 
-	m := newSolo(newTestViewport())
+	m := newSolo(newTestViewport(t))
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
 	return next.(soloModel)
 }
@@ -150,7 +153,7 @@ func TestHelpOverlayKeepsFrameGeometry(t *testing.T) {
 			t.Errorf("overlay line %d width = %d, want 120", i, w)
 		}
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "start group's dead sessions") {
+	if !strings.Contains(ansi.Strip(m.View()), "start group's ghosts") {
 		t.Errorf("overlay is not showing the keymap")
 	}
 }
@@ -238,7 +241,7 @@ func TestSettingsOpensAndEscRestoresTheExactFrame(t *testing.T) {
 		t.Fatal(", did not open settings")
 	}
 	settingsView := ansi.Strip(m.View())
-	for _, want := range []string{"settings", "Keys", "Backends", "About", "section", "back"} {
+	for _, want := range []string{"settings", "Fleet", "Panel", "System", "section", "back"} {
 		if !strings.Contains(settingsView, want) {
 			t.Errorf("settings view missing %q", want)
 		}
@@ -308,7 +311,11 @@ func TestTogglePrecedenceEnvBeatsFileBeatsDefault(t *testing.T) {
 	if got := toggleKeys(); len(got) != len(defaultToggles) || got[0] != defaultToggles[0] {
 		t.Errorf("with nothing set, toggleKeys() = %v, want the defaults", got)
 	}
-	if err := rail.SaveSettings(rail.Settings{Toggle: []string{"ctrl+j"}}); err != nil {
+	store, err := state.OpenDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveSettings(store, rail.Settings{Toggle: []string{"ctrl+j"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := toggleKeys(); len(got) != 1 || got[0] != "ctrl+j" {
@@ -326,21 +333,30 @@ func TestTogglePrecedenceEnvBeatsFileBeatsDefault(t *testing.T) {
 	}
 }
 
+// openPanelFields lands on Panel with the field cursor active (field 0 =
+// toggle). Multi-field sections need two Enters: section, then field.
+func openPanelFields(m soloModel) soloModel {
+	m = send(m, key(","))
+	m = send(m, key("j")) // Agents
+	m = send(m, key("j")) // Panel
+	m = send(m, key("enter"))
+	return m
+}
+
 // TestKeysFieldIsReadOnlyUnderEnv: a field the user cannot change says why,
 // rather than accepting a rebind it would then discard.
 func TestKeysFieldIsReadOnlyUnderEnv(t *testing.T) {
 	t.Setenv("GHOSTMUX_TOGGLE", "f9")
-	m := newChromeSolo(t)
-	m = send(m, key(","))
-	m = send(m, key("enter")) // ↵ on the Keys section
+	m := openPanelFields(newChromeSolo(t))
+	m = send(m, key("enter")) // ↵ on the toggle field
 	if m.settings.capture {
 		t.Errorf("capture started while GHOSTMUX_TOGGLE decides the binding")
 	}
-	if !strings.Contains(m.settings.msg, "GHOSTMUX_TOGGLE") {
-		t.Errorf("read-only field did not say why: %q", m.settings.msg)
+	if m.settings.msg != "GHOSTMUX_TOGGLE is set; unset it to change this setting" {
+		t.Errorf("read-only field message = %q", m.settings.msg)
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "read-only") {
-		t.Errorf("the pane does not show the field as read-only")
+	if !strings.Contains(ansi.Strip(m.View()), "GHOSTMUX_TOGGLE overrides the saved setting") {
+		t.Errorf("the pane does not show environment precedence")
 	}
 }
 
@@ -348,23 +364,26 @@ func TestKeysFieldIsReadOnlyUnderEnv(t *testing.T) {
 // new toggle works immediately and survives the next launch.
 func TestCaptureRebindsAppliesAndPersists(t *testing.T) {
 	t.Setenv("GHOSTMUX_TOGGLE", "")
-	m := newChromeSolo(t)
-	m = send(m, key(","))
+	m := openPanelFields(newChromeSolo(t))
 	m = send(m, key("enter"))
 	if !m.settings.capture {
-		t.Fatal("↵ on Keys did not start capture")
+		t.Fatal("↵ on the toggle field did not start capture")
 	}
 	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if m.settings.capture {
 		t.Errorf("capture did not end on the next key")
 	}
+	if m.settings.msg != "toggle key: ctrl+j" {
+		t.Errorf("toggle success message = %q", m.settings.msg)
+	}
 	if !m.toggles["ctrl+j"] || m.toggleLabel != "ctrl+j" {
 		t.Errorf("the new toggle is not live: %v / %q", m.toggles, m.toggleLabel)
 	}
-	if got := rail.LoadSettings().Toggle; len(got) != 1 || got[0] != "ctrl+j" {
+	if got := settingsFromStore(m.store).Toggle; len(got) != 1 || got[0] != "ctrl+j" {
 		t.Errorf("the new toggle was not persisted: %v", got)
 	}
-	m = send(m, key("esc"))
+	m = send(m, key("esc")) // leave fields
+	m = send(m, key("esc")) // close settings
 	if m2 := send(m, tea.KeyMsg{Type: tea.KeyCtrlJ}); m2.focus != focusViewport {
 		t.Errorf("the rebound toggle does not move focus")
 	}
@@ -373,11 +392,10 @@ func TestCaptureRebindsAppliesAndPersists(t *testing.T) {
 // TestCaptureEscCancels: esc during capture leaves the binding alone.
 func TestCaptureEscCancels(t *testing.T) {
 	t.Setenv("GHOSTMUX_TOGGLE", "")
-	m := newChromeSolo(t)
-	m = send(m, key(","))
+	m := openPanelFields(newChromeSolo(t))
 	m = send(m, key("enter"))
 	m = send(m, key("esc"))
-	if len(rail.LoadSettings().Toggle) != 0 {
+	if len(settingsFromStore(m.store).Toggle) != 0 {
 		t.Errorf("esc during capture still wrote a binding")
 	}
 	if m.toggleLabel != defaultToggles[0] {
@@ -389,12 +407,11 @@ func TestCaptureEscCancels(t *testing.T) {
 // but not the child's pty would leave every program wrapping at the wrong
 // column, so the edit re-runs the whole resize path.
 func TestWidthEditClampsSavesAndResizesEverything(t *testing.T) {
-	m := newChromeSolo(t)
-	m = send(m, key(","))
-	m = send(m, key("j")) // Rail
+	m := openPanelFields(newChromeSolo(t))
+	m = send(m, key("j")) // rail width
 	m = send(m, key("enter"))
 	if !m.settings.editing {
-		t.Fatal("↵ on Rail did not open the width editor")
+		t.Fatal("↵ on the width field did not open the editor")
 	}
 	m.settings.input.SetValue("999")
 	m = send(m, key("enter"))
@@ -402,15 +419,15 @@ func TestWidthEditClampsSavesAndResizesEverything(t *testing.T) {
 	if rail.Width() != 60 {
 		t.Errorf("width = %d, want the 60 clamp", rail.Width())
 	}
-	if got := rail.LoadSettings().RailWidth; got != 60 {
+	if got := settingsFromStore(m.store).RailWidth; got != 60 {
 		t.Errorf("clamped width not persisted: %d", got)
 	}
 	vw, _ := m.viewportSize()
 	if vw != 120-60-dividerCol {
 		t.Errorf("viewport was not resized with the rail: %d", vw)
 	}
-	if !strings.Contains(m.settings.msg, "clamped") {
-		t.Errorf("a clamped edit did not say so: %q", m.settings.msg)
+	if m.settings.msg != "rail width: 60 (clamped to 20-60)" {
+		t.Errorf("clamped edit message = %q", m.settings.msg)
 	}
 
 	m.settings.editing = true
@@ -430,7 +447,6 @@ func TestAgentsEditIsAToggle(t *testing.T) {
 	m := newChromeSolo(t)
 	t.Cleanup(func() { rail.RemoveAgentCmd("mybot") })
 	m = send(m, key(","))
-	m = send(m, key("j"))
 	m = send(m, key("j")) // Agents
 
 	m = send(m, key("enter"))
@@ -439,7 +455,7 @@ func TestAgentsEditIsAToggle(t *testing.T) {
 	if got := rail.ExtraAgentCmds(); len(got) != 1 || got[0] != "mybot" {
 		t.Fatalf("agent not added: %v", got)
 	}
-	if got := rail.LoadSettings().Agents; len(got) != 1 || got[0] != "mybot" {
+	if got := settingsFromStore(m.store).Agents; len(got) != 1 || got[0] != "mybot" {
 		t.Errorf("agent not persisted: %v", got)
 	}
 
@@ -449,7 +465,7 @@ func TestAgentsEditIsAToggle(t *testing.T) {
 	if got := rail.ExtraAgentCmds(); len(got) != 0 {
 		t.Errorf("entering an existing extra did not remove it: %v", got)
 	}
-	if got := rail.LoadSettings().Agents; len(got) != 0 {
+	if got := settingsFromStore(m.store).Agents; len(got) != 0 {
 		t.Errorf("removal not persisted: %v", got)
 	}
 
@@ -458,21 +474,73 @@ func TestAgentsEditIsAToggle(t *testing.T) {
 	m.settings.editing = true
 	m.settings.input = settingsInput("claude")
 	m = send(m, key("enter"))
-	if !m.settings.msgErr {
-		t.Errorf("removing a built-in was not refused")
+	if !m.settings.msgErr || m.settings.msg != "claude is built in and cannot be removed" {
+		t.Errorf("built-in refusal = %q err=%v", m.settings.msg, m.settings.msgErr)
 	}
 }
 
-// TestBackendsAndStateShowOnlyProvableFacts: the evidence law, in the two
-// sections most tempted to guess.
-func TestBackendsAndStateShowOnlyProvableFacts(t *testing.T) {
+// TestFleetDirSettingsCycleAndApply: Fleet owns the two dir policies; ↵ on
+// each field flips it and the next create/capture uses the new mode.
+func TestFleetDirSettingsCycleAndApply(t *testing.T) {
+	m := newChromeSolo(t)
+	t.Cleanup(func() {
+		rail.SetGhostDir("")
+		rail.SetCreateDir("")
+	})
+	m = send(m, key(","))
+	if section(m.settings.cursor) != secFleet {
+		t.Fatalf("cursor = %d, want Fleet", m.settings.cursor)
+	}
+	m = send(m, key("enter")) // enter fields
+	m = send(m, key("enter")) // cycle ghost dir
+	if settingsFromStore(m.store).GhostDir != rail.GhostDirLast {
+		t.Fatalf("first cycle did not persist last: %+v", settingsFromStore(m.store))
+	}
+	if rail.GhostDir() != rail.GhostDirLast {
+		t.Fatalf("first cycle did not apply live mode: %q", rail.GhostDir())
+	}
+	if m.settings.msg != "ghost dir: last working directory" {
+		t.Errorf("cycle message = %q", m.settings.msg)
+	}
+	m = send(m, key("enter"))
+	if settingsFromStore(m.store).GhostDir != "" {
+		t.Fatalf("second cycle did not clear to default launch: %+v", settingsFromStore(m.store))
+	}
+	if rail.GhostDir() != rail.GhostDirLaunch {
+		t.Fatalf("second cycle live mode = %q, want launch", rail.GhostDir())
+	}
+
+	m = send(m, key("j")) // new session dir
+	m = send(m, key("enter"))
+	if settingsFromStore(m.store).CreateDir != rail.CreateDirCurrent {
+		t.Fatalf("create dir cycle did not persist current: %+v", settingsFromStore(m.store))
+	}
+	if rail.CreateDir() != rail.CreateDirCurrent {
+		t.Fatalf("create dir live mode = %q, want current", rail.CreateDir())
+	}
+	if m.settings.msg != "new session dir: current session's cwd" {
+		t.Errorf("create dir message = %q", m.settings.msg)
+	}
+}
+
+// TestSystemShowsOnlyProvableFacts: backends, state, and about are one
+// diagnostic surface — evidence only, never inference.
+func TestSystemShowsOnlyProvableFacts(t *testing.T) {
+	got := buildVersion()
+	if got == "" {
+		t.Fatal("buildVersion() is empty")
+	}
 	m := newChromeSolo(t)
 	m = send(m, key(","))
-	for range 3 {
-		m = send(m, key("j")) // Backends
+	m = send(m, key("G")) // System
+	if section(m.settings.cursor) != secSystem {
+		t.Fatalf("cursor = %d, want System", m.settings.cursor)
 	}
 	if m.settings.backends == nil {
 		t.Fatal("backends were not probed on section entry")
+	}
+	if m.settings.state == nil {
+		t.Fatal("state file was not read on section entry")
 	}
 	probed := m.settings.backends
 	m = send(m, key("k"))
@@ -485,43 +553,25 @@ func TestBackendsAndStateShowOnlyProvableFacts(t *testing.T) {
 			t.Errorf("%s is not installed but reported a version %q", f.name, f.version)
 		}
 	}
-
-	m = send(m, key("j")) // State
-	if m.settings.state == nil {
-		t.Fatal("state file was not read on section entry")
-	}
 	plain := ansi.Strip(m.View())
-	if !strings.Contains(plain, "ghostmux/groups.json") {
-		t.Errorf("State does not name the file: %s", plain)
+	detail := ansi.Strip(strings.Join(stateDetail(m.settings.state), "\n"))
+	if !strings.Contains(detail, m.store.Path()) {
+		t.Errorf("System does not name the state file: %s", detail)
 	}
 	if m.settings.state.Exists {
 		t.Errorf("a fresh state dir reported an existing file")
 	}
-	if !strings.Contains(plain, "not created yet") {
+	if !strings.Contains(plain, "created when settings or groups are first saved") {
 		t.Errorf("a missing file was not reported as missing: %s", plain)
 	}
-}
-
-// TestAboutVersionIsNeverInvented: a build with no stamp says "dev build"
-// rather than a number nobody can check.
-func TestAboutVersionIsNeverInvented(t *testing.T) {
-	got := buildVersion()
-	if got == "" {
-		t.Fatal("buildVersion() is empty")
-	}
-	m := newChromeSolo(t)
-	m = send(m, key(","))
-	for range 5 {
-		m = send(m, key("j")) // About
-	}
-	plain := ansi.Strip(m.View())
 	if !strings.Contains(plain, got) {
-		t.Errorf("About does not show the build version %q", got)
+		t.Errorf("System does not show the build version %q", got)
 	}
-	for _, law := range []string{"evidence, never inference", "ship only what the multiplexer"} {
-		if !strings.Contains(plain, law) {
-			t.Errorf("About does not state the law %q", law)
-		}
+	if !strings.Contains(plain, "The tmux fleet navigator") {
+		t.Errorf("System does not show the technical description: %s", plain)
+	}
+	if strings.Contains(plain, "laws") || strings.Contains(plain, "mission control") {
+		t.Errorf("System retained removed product-language copy: %s", plain)
 	}
 }
 
@@ -539,7 +589,331 @@ func TestSettingsBarShowsItsOwnKeys(t *testing.T) {
 	if strings.Contains(bar, "kill") {
 		t.Errorf("settings bar still advertises rail keys: %q", bar)
 	}
-	if w := ansi.StringWidth(m.statusLine(120)); w != 120 {
+	if w := ansi.StringWidth(strings.Split(m.statusLine(120), "\n")[0]); w != 120 {
 		t.Errorf("settings bar width = %d, want 120", w)
+	}
+}
+
+func corruptPrimaryAfterOpen(t *testing.T, m soloModel) []byte {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(m.store.Path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invalid := []byte("{invalid state")
+	if err := os.WriteFile(m.store.Path(), invalid, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return invalid
+}
+
+func TestSettingsSaveBeforeApplyingLiveBehavior(t *testing.T) {
+	t.Run("toggle", func(t *testing.T) {
+		t.Setenv("GHOSTMUX_TOGGLE", "")
+		m := newChromeSolo(t)
+		oldLabel := m.toggleLabel
+		invalid := corruptPrimaryAfterOpen(t, m)
+		m = openPanelFields(m)
+		m = send(m, key("enter"))
+		m = send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if m.toggleLabel != oldLabel || m.toggles["ctrl+j"] {
+			t.Fatalf("failed save changed live toggle: %q %v", m.toggleLabel, m.toggles)
+		}
+		if !m.settings.msgErr || !strings.Contains(m.settings.msg, "state save failed") {
+			t.Fatalf("toggle save failure not shown: %q", m.settings.msg)
+		}
+		if got, _ := os.ReadFile(m.store.Path()); string(got) != string(invalid) {
+			t.Fatalf("invalid primary was overwritten: %q", got)
+		}
+	})
+
+	t.Run("width", func(t *testing.T) {
+		rail.SetWidth(30)
+		m := newChromeSolo(t)
+		oldWidth := rail.Width()
+		invalid := corruptPrimaryAfterOpen(t, m)
+		m = openPanelFields(m)
+		m = send(m, key("j")) // width field
+		m = send(m, key("enter"))
+		m.settings.input.SetValue("50")
+		m = send(m, key("enter"))
+		if rail.Width() != oldWidth {
+			t.Fatalf("failed save changed live width: %d -> %d", oldWidth, rail.Width())
+		}
+		if !m.settings.msgErr || !strings.Contains(m.settings.msg, "state save failed") {
+			t.Fatalf("width save failure not shown: %q", m.settings.msg)
+		}
+		if got, _ := os.ReadFile(m.store.Path()); string(got) != string(invalid) {
+			t.Fatalf("invalid primary was overwritten: %q", got)
+		}
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		rail.SetExtraAgentCmds(nil)
+		t.Cleanup(func() { rail.SetExtraAgentCmds(nil) })
+		m := newChromeSolo(t)
+		invalid := corruptPrimaryAfterOpen(t, m)
+		m = send(m, key(","))
+		m = send(m, key("j")) // Agents
+		m = send(m, key("enter"))
+		m.settings.input.SetValue("mybot")
+		m = send(m, key("enter"))
+		if len(rail.ExtraAgentCmds()) != 0 {
+			t.Fatalf("failed save changed live agents: %v", rail.ExtraAgentCmds())
+		}
+		if !m.settings.msgErr || !strings.Contains(m.settings.msg, "state save failed") {
+			t.Fatalf("agent save failure not shown: %q", m.settings.msg)
+		}
+		if got, _ := os.ReadFile(m.store.Path()); string(got) != string(invalid) {
+			t.Fatalf("invalid primary was overwritten: %q", got)
+		}
+	})
+}
+
+func TestSettingsConflictAdoptsAllSettingsAndRetryPreservesExternalAgent(t *testing.T) {
+	t.Setenv("GHOSTMUX_TOGGLE", "")
+	rail.SetExtraAgentCmds(nil)
+	t.Cleanup(func() { rail.SetExtraAgentCmds(nil) })
+	m := newChromeSolo(t)
+	external, err := state.Open(m.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalSettings := state.Settings{
+		Toggle: []string{"ctrl+x"}, RailWidth: 44, Agents: []string{"externalbot"},
+	}
+	if err := external.Update(func(doc *state.Document) error {
+		doc.Groups = []state.Group{{Name: "external"}}
+		doc.Settings = &externalSettings
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m = send(m, key(","))
+	m = send(m, key("j")) // Agents
+	staleInfo := m.store.Info()
+	m.settings.state = &staleInfo
+	m = send(m, key("enter"))
+	m.settings.input.SetValue("localbot")
+	m = send(m, key("enter"))
+	if m.settings.msg != "state changed in another panel; change not saved" || !m.settings.msgErr {
+		t.Fatalf("conflict message = %q err=%v", m.settings.msg, m.settings.msgErr)
+	}
+	if m.settings.state != nil {
+		t.Fatal("conflict adoption did not invalidate cached State info")
+	}
+	adopted := settingsFromStore(m.store)
+	if got := adopted.Agents; len(got) != 1 || got[0] != "externalbot" {
+		t.Fatalf("failed local mutation changed adopted agents: %v", got)
+	}
+	if adopted.RailWidth != 44 || len(adopted.Toggle) != 1 || adopted.Toggle[0] != "ctrl+x" {
+		t.Fatalf("Store did not adopt external settings: %+v", adopted)
+	}
+	if rail.Width() != 44 {
+		t.Fatalf("external width was not activated: %d", rail.Width())
+	}
+	if got := rail.ExtraAgentCmds(); len(got) != 1 || got[0] != "externalbot" {
+		t.Fatalf("external agents were not activated: %v", got)
+	}
+	if m.toggleLabel != "ctrl+x" || !m.toggles["ctrl+x"] || m.toggles[defaultToggles[0]] {
+		t.Fatalf("external toggle was not activated: %q %v", m.toggleLabel, m.toggles)
+	}
+	if vw, _ := m.viewportSize(); vw != 120-44-dividerCol {
+		t.Fatalf("external width did not resize layout/PTY path: viewport width %d", vw)
+	}
+	if !strings.Contains(ansi.Strip(m.rail.View()), "external") {
+		t.Fatalf("rail did not adopt Store snapshot after conflict: %s", ansi.Strip(m.rail.View()))
+	}
+
+	m = send(m, key("enter"))
+	if !m.settings.editing {
+		t.Fatal("retry did not reopen the agent editor")
+	}
+	m.settings.input.SetValue("localbot")
+	m = send(m, key("enter"))
+	if m.settings.msg != "agent added: localbot" || m.settings.msgErr {
+		t.Fatalf("retry message = %q err=%v", m.settings.msg, m.settings.msgErr)
+	}
+	got := settingsFromStore(m.store)
+	if len(got.Agents) != 2 || got.Agents[0] != "externalbot" || got.Agents[1] != "localbot" {
+		t.Fatalf("retry erased the external agent: %v", got.Agents)
+	}
+	if got.RailWidth != 44 || len(got.Toggle) != 1 || got.Toggle[0] != "ctrl+x" {
+		t.Fatalf("retry erased other external settings: %+v", got)
+	}
+}
+
+func TestSuccessfulSettingsWritesInvalidateCachedStateInfo(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(soloModel) soloModel
+	}{
+		{name: "toggle", write: func(m soloModel) soloModel {
+			next, _ := m.captureToggle(tea.KeyMsg{Type: tea.KeyCtrlJ})
+			return next.(soloModel)
+		}},
+		{name: "width", write: func(m soloModel) soloModel {
+			next, _ := m.applyWidth("41")
+			return next.(soloModel)
+		}},
+		{name: "agent", write: func(m soloModel) soloModel {
+			next, _ := m.applyAgent("cachebot")
+			return next.(soloModel)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GHOSTMUX_TOGGLE", "")
+			rail.SetExtraAgentCmds(nil)
+			t.Cleanup(func() { rail.SetExtraAgentCmds(nil) })
+			m := newChromeSolo(t)
+			m = send(m, key(","))
+			cached := m.store.Info()
+			m.settings.state = &cached
+			m = test.write(m)
+			if m.settings.state != nil {
+				t.Fatal("successful settings write retained cached State info")
+			}
+			m.settings.cursor = int(secSystem)
+			m.settings.enter()
+			if m.settings.state == nil || m.settings.state.Status != state.StatusValid {
+				t.Fatalf("State info was not refreshed after write: %+v", m.settings.state)
+			}
+		})
+	}
+}
+
+func TestToggleSourceUsesExplicitStoreSettingEvenWhenItEqualsDefault(t *testing.T) {
+	t.Setenv("GHOSTMUX_TOGGLE", "")
+	m := newChromeSolo(t)
+	cfg := settingsFromStore(m.store)
+	cfg.Toggle = append([]string(nil), defaultToggles...)
+	if err := saveSettings(m.store, cfg); err != nil {
+		t.Fatal(err)
+	}
+	m = m.openSettings()
+	m.settings.cursor = int(secPanel)
+	m.settings.enter()
+	plain := ansi.Strip(strings.Join(m.panelDetail(), "\n"))
+	if !strings.Contains(plain, "source") || !strings.Contains(plain, "saved setting") {
+		t.Fatalf("default-valued explicit toggle reported the wrong source: %s", plain)
+	}
+}
+
+func TestStartupStateErrorRemainsVisibleAndReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	path := filepath.Join(dir, "ghostmux", "groups.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invalid := []byte("{broken")
+	if err := os.WriteFile(path, invalid, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := tmux.Runner
+	tmux.Runner = func(args ...string) (string, error) { return "", nil }
+	t.Cleanup(func() { tmux.Runner = orig })
+	store, err := state.OpenDefault()
+	if err == nil {
+		t.Fatal("corrupt startup primary loaded without error")
+	}
+	m := newSolo(newTestViewport(t), store)
+	if !strings.Contains(ansi.Strip(m.rail.View()), "state read-only: corrupt") {
+		t.Fatalf("startup error not visible in rail: %s", ansi.Strip(m.rail.View()))
+	}
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 32})
+	m = send(m, key(","))
+	m = send(m, key("G")) // System
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "status  corrupt") || !strings.Contains(plain, "state is read-only") {
+		t.Fatalf("System detail does not report corruption: %s", plain)
+	}
+	m = send(m, key("g"))     // Fleet
+	m = send(m, key("j"))     // Agents
+	m = send(m, key("j"))     // Panel
+	m = send(m, key("enter")) // enter fields
+	m = send(m, key("enter")) // toggle field
+	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if !m.settings.msgErr {
+		t.Fatal("write attempt against startup corruption was not reported")
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(invalid) {
+		t.Fatalf("startup corruption was cleared by write attempt: %q", got)
+	}
+}
+
+func TestSettingsTechnicalCopy(t *testing.T) {
+	m := newChromeSolo(t)
+	m = send(m, key(","))
+	if got := ansi.Strip(strings.Join(m.fleetDetail(), "\n")); !strings.Contains(got, "ghost dir") || !strings.Contains(got, "new session dir") {
+		t.Errorf("fleet copy missing: %s", got)
+	}
+	m.settings.cursor = int(secPanel)
+	m.settings.inFields = true
+	m.settings.field = 0
+	m.settings.capture = true
+	if got := ansi.Strip(strings.Join(m.panelDetail(), "\n")); !strings.Contains(got, "press new toggle key; esc cancels") {
+		t.Errorf("capture copy missing: %s", got)
+	}
+	m.settings.capture = false
+	if got := ansi.Strip(strings.Join(m.panelDetail(), "\n")); !strings.Contains(got, "width applies immediately") {
+		t.Errorf("panel width copy missing: %s", got)
+	}
+	if got := ansi.Strip(strings.Join(m.agentsDetail(90), "\n")); !strings.Contains(got, "enter a command name to add or remove it") || !strings.Contains(got, "built-ins cannot be removed") {
+		t.Errorf("agent copy missing: %s", got)
+	}
+	facts := []backendFact{{name: "tmux", installed: true, path: "/bin/tmux", version: "tmux 3"}}
+	if got := ansi.Strip(strings.Join(backendsDetail(facts), "\n")); !strings.Contains(got, "versions reported by installed binaries") {
+		t.Errorf("backend copy missing: %s", got)
+	}
+	validInfo := &state.Info{
+		Path: "/tmp/groups.json", Status: state.StatusValid, Version: 1,
+		BackupPath: "/tmp/groups.json.bak", BackupStatus: state.StatusLegacy,
+	}
+	if got := ansi.Strip(strings.Join(stateDetail(validInfo), "\n")); !strings.Contains(got, "saved file contents") || !strings.Contains(got, "backup is retained but not restored automatically") {
+		t.Errorf("state copy missing: %s", got)
+	}
+	m.settings.backends = facts
+	m.settings.state = validInfo
+	if got := ansi.Strip(strings.Join(m.systemDetail(), "\n")); !strings.Contains(got, "The tmux fleet navigator") {
+		t.Errorf("system about copy missing: %s", got)
+	}
+}
+
+func TestRecoveryRequiredStateDetailIsActionable(t *testing.T) {
+	info := &state.Info{
+		Path:          "/tmp/groups.json",
+		Status:        state.StatusRecoveryRequired,
+		Error:         "restore the backup to the primary path or remove the backup deliberately",
+		BackupPath:    "/tmp/groups.json.bak",
+		BackupExists:  true,
+		BackupStatus:  state.StatusValid,
+		BackupVersion: 1,
+	}
+	plain := ansi.Strip(strings.Join(stateDetail(info), "\n"))
+	for _, want := range []string{"status  recovery required", "state is read-only", "restore the backup", "remove the backup deliberately"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("recovery State detail missing %q: %s", want, plain)
+		}
+	}
+}
+
+func TestStateStatusTextDistinguishesStorageConditions(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{state.StatusMissing, "missing"},
+		{state.StatusValid, "valid (schema version 1)"},
+		{state.StatusLegacy, "legacy (unversioned)"},
+		{state.StatusCorrupt, "corrupt"},
+		{state.StatusUnreadable, "unreadable"},
+		{state.StatusUnsupported, "unsupported schema version"},
+		{state.StatusRecoveryRequired, "recovery required"},
+	} {
+		if got := stateStatusText(test.status, 1); got != test.want {
+			t.Errorf("stateStatusText(%q) = %q, want %q", test.status, got, test.want)
+		}
 	}
 }

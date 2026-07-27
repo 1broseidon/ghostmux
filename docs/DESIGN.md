@@ -1,5 +1,10 @@
 # ghostmux rail hub — complete screen spec (TUI mockup)
 
+> **Scope note (2026-07-27):** ghostmux is tmux-only. The multi-backend
+> prototype (zellij beside tmux) was cut after the v0.3 panel shipped;
+> references to zellij, aux backends, or `z` in this document are historical
+> and no longer describe the product. ghostmux is the tmux fleet navigator.
+
 Design source of truth for the all-screens HTML artifact. This is a **terminal
 mockup**, not a web app: every pixel belongs to a monospace character grid, every
 color is from Gruvbox Dark Hard, all chrome is box-drawing characters and a tmux

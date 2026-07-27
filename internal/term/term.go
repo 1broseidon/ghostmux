@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,12 +38,33 @@ const coalesceWindow = 30 * time.Millisecond
 // stopGrace is how long Stop waits after SIGHUP before SIGKILL.
 const stopGrace = 500 * time.Millisecond
 
-// child is one pty process: the cmd, its pty master, and a channel closed
-// once Wait has reaped it.
+// ptyDrainGrace bounds the wait for EOF after a natural exit. Normally the
+// reader reaches EOF immediately after draining queued output; the deadline
+// handles descendants that inherited a slave descriptor and keep it open.
+const ptyDrainGrace = 100 * time.Millisecond
+
+// ptyReadPollInterval bounds how quickly an otherwise blocked reader observes
+// a Stop or drain-deadline request. Closing a file descriptor from another
+// goroutine does not reliably interrupt an in-flight PTY read on Unix.
+const ptyReadPollInterval = 10 * time.Millisecond
+
+const (
+	childRunning uint32 = iota
+	childStopping
+	childExited // a natural exit won the running -> exited transition
+	childStopped
+)
+
+// child is one pty process. done closes only after Wait has reaped the
+// process, the PTY output reader has stopped, and any natural ExitMsg has been
+// delivered. state decides whether a racing exit or Stop owns the lifecycle.
 type child struct {
-	cmd  *exec.Cmd
-	ptmx *os.File
-	done chan struct{}
+	cmd        *exec.Cmd
+	ptmx       *os.File
+	done       chan struct{}
+	readerStop chan struct{}
+	readerDone chan struct{}
+	state      atomic.Uint32
 }
 
 // Widget is an embedded terminal: pointer semantics only — the pty goroutines
@@ -51,6 +73,11 @@ type child struct {
 type Widget struct {
 	emu    *vt.SafeEmulator
 	notify func(tea.Msg) // posts OutputMsg/ExitMsg into the host program
+
+	lifecycleMu sync.Mutex // serializes Start, Stop, and Close
+	closed      bool
+	inputCloser io.Closer
+	inputDone   chan struct{}
 
 	mu    sync.Mutex
 	child *child
@@ -74,9 +101,16 @@ func New(cols, rows int, notify func(tea.Msg)) *Widget {
 	if rows < 1 {
 		rows = 1
 	}
+	emu := vt.NewSafeEmulator(cols, rows)
+	inputCloser, ok := emu.InputPipe().(io.Closer)
+	if !ok {
+		panic("term: emulator input pipe is not closable")
+	}
 	w := &Widget{
-		emu:           vt.NewSafeEmulator(cols, rows),
+		emu:           emu,
 		notify:        notify,
+		inputCloser:   inputCloser,
+		inputDone:     make(chan struct{}),
 		cols:          cols,
 		rows:          rows,
 		cursorVisible: true,
@@ -88,25 +122,29 @@ func New(cols, rows int, notify func(tea.Msg)) *Widget {
 			w.mu.Unlock()
 		},
 	})
-	// Persistent input forwarder: the emulator encodes SendKey/SendMouse/
-	// Paste (and its own query replies — DSR, DA1, in-band resize) into its
-	// input pipe; this pumps those bytes to whichever pty is current. Lives
-	// for the widget's lifetime; emulator Read only fails once emu is closed.
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := w.emu.Read(buf)
-			if n > 0 {
-				if dst := w.inputDest(); dst != nil {
-					dst.Write(buf[:n])
-				}
-			}
-			if err != nil {
-				return
+	// The persistent forwarder exclusively owns emulator Read. Closing the
+	// retained input pipe interrupts a blocked Read so Close can join it before
+	// closing the emulator.
+	go w.forwardInput()
+	return w
+}
+
+// forwardInput pumps emulator-encoded input to whichever PTY is current.
+// Besides keys, this carries query replies (DSR, DA1, in-band resize).
+func (w *Widget) forwardInput() {
+	defer close(w.inputDone)
+	buf := make([]byte, 4096)
+	for {
+		n, err := w.emu.Read(buf)
+		if n > 0 {
+			if dst := w.inputDest(); dst != nil {
+				_, _ = dst.Write(buf[:n])
 			}
 		}
-	}()
-	return w
+		if err != nil {
+			return
+		}
+	}
 }
 
 // Start launches argv on a fresh pty sized to the widget, stopping any
@@ -114,7 +152,12 @@ func New(cols, rows int, notify func(tea.Msg)) *Widget {
 // with TMUX/TMUX_PANE stripped (the child must not think it is nested) and
 // TERM=xterm-256color (what the emulator speaks).
 func (w *Widget) Start(argv []string, env []string) error {
-	w.Stop()
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	w.stopLocked()
 	if env == nil {
 		env = childEnv()
 	}
@@ -127,40 +170,94 @@ func (w *Widget) Start(argv []string, env []string) error {
 	if err != nil {
 		return err
 	}
-	c := &child{cmd: cmd, ptmx: ptmx, done: make(chan struct{})}
+	c := &child{
+		cmd:        cmd,
+		ptmx:       ptmx,
+		done:       make(chan struct{}),
+		readerStop: make(chan struct{}),
+		readerDone: make(chan struct{}),
+	}
 	w.mu.Lock()
 	w.child = c
 	w.mu.Unlock()
 
-	// Reader: pty output → emulator, redraw notifications coalesced.
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, rerr := ptmx.Read(buf)
-			if n > 0 {
-				w.emu.Write(buf[:n])
-				w.noteOutput()
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-
-	// Reaper: waits the child; posts ExitMsg only if this child is still the
-	// current one (a Stop-initiated death is the caller's own doing).
-	go func() {
-		werr := cmd.Wait()
-		close(c.done)
-		ptmx.Close()
-		w.mu.Lock()
-		current := w.child == c
-		w.mu.Unlock()
-		if current && w.notify != nil {
-			w.notify(ExitMsg{Err: werr})
-		}
-	}()
+	go w.readOutput(c)
+	go w.reap(c)
 	return nil
+}
+
+// readOutput copies one child's PTY output into the emulator. Polling keeps
+// the read single-owner and lets a cancellation request reliably interrupt an
+// idle PTY; closing the descriptor concurrently with a blocking Read does not.
+func (w *Widget) readOutput(c *child) {
+	defer func() {
+		_ = c.ptmx.Close()
+		close(c.readerDone)
+	}()
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-c.readerStop:
+			return
+		default:
+		}
+		ready, err := pollPTYReadable(c.ptmx, ptyReadPollInterval)
+		if err != nil {
+			return
+		}
+		if !ready {
+			continue
+		}
+		select {
+		case <-c.readerStop:
+			return
+		default:
+		}
+		n, readErr := c.ptmx.Read(buf)
+		if n > 0 {
+			_, _ = w.emu.Write(buf[:n])
+			w.noteOutput()
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+// reap owns cmd.Wait and coordinates the reader's final PTY close. A natural
+// exit drains queued output to EOF, subject only to a bounded wait for
+// inherited slave descriptors. Stop requests a prompt close and wins the state
+// transition, so its reaper only has to join the reader. A legitimate ExitMsg
+// is delivered before done closes, keeping replacement linearized after the
+// notification.
+func (w *Widget) reap(c *child) {
+	werr := c.cmd.Wait()
+	natural := c.state.CompareAndSwap(childRunning, childExited)
+	if natural {
+		w.drainOutput(c)
+	} else {
+		<-c.readerDone
+		c.state.Store(childStopped)
+	}
+
+	if natural && w.notify != nil {
+		w.notify(ExitMsg{Err: werr})
+	}
+	close(c.done)
+}
+
+// drainOutput lets readOutput consume all bytes through EOF after a natural
+// exit. Descendants can keep the slave open indefinitely, so once the bounded
+// window expires it asks readOutput to close the master, then joins it.
+func (w *Widget) drainOutput(c *child) {
+	timer := time.NewTimer(ptyDrainGrace)
+	defer timer.Stop()
+	select {
+	case <-c.readerDone:
+	case <-timer.C:
+		close(c.readerStop)
+		<-c.readerDone
+	}
 }
 
 // inputDest is where emulator-encoded input bytes go: the test sink when
@@ -196,29 +293,60 @@ func childEnv() []string {
 // Start. The emulator keeps its last frame — the caller decides what replaces
 // it.
 func (w *Widget) Stop() {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	w.stopLocked()
+}
+
+// stopLocked implements Stop while lifecycleMu is held.
+func (w *Widget) stopLocked() {
 	w.mu.Lock()
 	c := w.child
-	w.child = nil // detach first: the reaper posts no ExitMsg for this death
-	w.mu.Unlock()
 	if c == nil {
+		w.mu.Unlock()
 		return
 	}
-	if c.cmd.Process != nil {
-		c.cmd.Process.Signal(syscall.SIGHUP)
-		select {
-		case <-c.done:
-		case <-time.After(stopGrace):
-			c.cmd.Process.Kill()
-			<-c.done
+	stopping := c.state.CompareAndSwap(childRunning, childStopping)
+	if stopping {
+		close(c.readerStop)
+	}
+	w.child = nil
+	w.mu.Unlock()
+
+	if stopping {
+		// Mark stopping before detaching or signaling. readOutput observes the
+		// request promptly, closes the master itself, and reap owns its join.
+		if c.cmd.Process != nil {
+			_ = c.cmd.Process.Signal(syscall.SIGHUP)
 		}
+	}
+
+	timer := time.NewTimer(stopGrace)
+	defer timer.Stop()
+	select {
+	case <-c.done:
+		return
+	case <-timer.C:
+		if c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		<-c.done
 	}
 }
 
-// Close stops the child and closes the emulator, ending the input-forwarder
-// goroutine. The widget is dead after this.
+// Close joins the child and both widget-owned emulator goroutines before
+// closing the emulator. The widget is dead after this.
 func (w *Widget) Close() {
-	w.Stop()
-	w.emu.Close()
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
+	w.stopLocked()
+	_ = w.inputCloser.Close()
+	<-w.inputDone
+	_ = w.emu.Close()
 }
 
 // Running reports whether a child is alive on the pty.

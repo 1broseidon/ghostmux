@@ -1,19 +1,18 @@
 // Package app is the ghostmux panel: the program `ghostmux` starts. It owns
 // the outer frame — draws the rail itself and renders the selected session
-// through an embedded terminal emulator running one child (`tmux attach`,
-// `zellij attach`, whatever the row says).
+// through an embedded terminal emulator running one child (`tmux attach`).
 //
-// The inner multiplexers keep everything that makes them worth using:
-// persistence, session truth, their own keymaps. ghostmux is only the frame.
-// What that buys: one bar instead of two nested ones, keybindings that are
-// in-process (so nothing can be stolen from the program you are using), no
-// host abstraction, a cockpit a zellij-only user can run with tmux absent —
-// and, because two panels share nothing but the muxes they read, a per-client
-// view: two terminals can watch different sessions without fighting.
+// tmux keeps everything that makes it worth using: persistence, session
+// truth, its own keymap. ghostmux is only the frame. What that buys: one bar
+// instead of two nested ones, keybindings that are in-process (so nothing can
+// be stolen from the program you are using), no host abstraction — and a
+// per-client viewport: panels share saved organization and settings, but two
+// terminals can still watch different sessions without fighting.
 package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/1broseidon/ghostmux/internal/rail"
+	"github.com/1broseidon/ghostmux/internal/state"
 	"github.com/1broseidon/ghostmux/internal/term"
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
@@ -36,7 +36,7 @@ const (
 // defaultToggles is the key the frame reserves for rail ⇄ viewport:
 // ctrl+alt+\ — the three-modifier chord is essentially never claimed by a
 // desktop environment (plain ctrl+\ is: 1Password grabs it on some Linux
-// setups), tmux, zellij, or a TUI, so one clean default suffices. The earlier
+// setups), tmux, or a TUI, so one clean default suffices. The earlier
 // second key (F12) existed as lockout insurance; that job is now done better
 // by three recovery paths that all work with a dead toggle: the mouse routes
 // by coordinates, `,` opens settings from the rail to rebind by capture, and
@@ -52,6 +52,7 @@ const dividerCol = 1
 
 type soloModel struct {
 	rail        rail.Model
+	store       *state.Store
 	vp          *ptyViewport
 	focus       int
 	w, h        int
@@ -72,9 +73,16 @@ type soloModel struct {
 // — a grabbed chord, a strange terminal — and a stored setting must not be
 // able to override the escape hatch. An env value of only separators falls
 // back rather than leaving the frame with no way out of the viewport.
-func toggleKeys() []string {
+func toggleKeys(stores ...*state.Store) []string {
+	var store *state.Store
+	if len(stores) > 0 {
+		store = stores[0]
+	}
+	if store == nil {
+		store, _ = state.OpenDefault()
+	}
 	keys := defaultToggles
-	if saved := rail.LoadSettings().Toggle; len(saved) > 0 {
+	if saved := settingsFromStore(store).Toggle; len(saved) > 0 {
 		keys = saved
 	}
 	var env []string
@@ -101,25 +109,31 @@ func toggleEnvLocked() bool {
 	return false
 }
 
-func newSolo(vp *ptyViewport) soloModel {
-	applySettings(rail.LoadSettings())
-	keys := toggleKeys()
+func newSolo(vp *ptyViewport, stores ...*state.Store) soloModel {
+	var store *state.Store
+	if len(stores) > 0 {
+		store = stores[0]
+	}
+	if store == nil {
+		store, _ = state.OpenDefault()
+	}
+	applySettings(settingsFromStore(store))
+	keys := toggleKeys(store)
 	set := make(map[string]bool, len(keys))
 	for _, k := range keys {
 		set[k] = true
 	}
 	// Tell the rail what we reserved so `?` reports the truth.
 	rail.SetToggleKeys(keys...)
-	r := rail.New(vp)
-	// The panel is stateless — everything it draws is rediscovered from the
-	// muxes each tick — so relaunching it anywhere rebuilds the same cockpit.
-	// That makes `tmux new -A -s gm ghostmux` a complete answer to resume, and
-	// this is what keeps it safe: never list the session hosting us, or ↵ on
-	// that row renders the panel inside itself.
-	if backend, sess := hostSession(); sess != "" {
-		r = r.InHost(backend, sess)
+	r := rail.New(vp, store)
+	// Live session rows are rediscovered from the muxes, while saved groups and
+	// settings come from Store. Relaunching rebuilds the cockpit from both. It
+	// remains safe inside a host session only if that session is excluded; ↵ on
+	// its row would otherwise render the panel inside itself.
+	if sess := hostSession(); sess != "" {
+		r = r.InHost(sess)
 	}
-	return soloModel{rail: r, vp: vp, focus: focusRail, toggles: set, toggleLabel: keys[0]}
+	return soloModel{rail: r, store: store, vp: vp, focus: focusRail, toggles: set, toggleLabel: keys[0]}
 }
 
 // applySettings pushes the stored settings into the packages that own the
@@ -127,25 +141,53 @@ func newSolo(vp *ptyViewport) soloModel {
 // "applied" are the same code path — a setting that only takes effect on the
 // next launch is a setting the user has to be told about.
 func applySettings(s rail.Settings) {
-	if s.RailWidth != 0 {
-		rail.SetWidth(s.RailWidth)
+	width := s.RailWidth
+	if width == 0 {
+		width = rail.DefaultWidth()
 	}
-	rail.AddAgentCmds(s.Agents)
+	rail.SetWidth(width)
+	rail.SetExtraAgentCmds(s.Agents)
+	rail.SetGhostDir(s.GhostDir)
+	rail.SetCreateDir(s.CreateDir)
 }
 
-// hostSession identifies the multiplexer session this frame is running inside,
-// if any: ("" , name) for tmux, ("zellij", name) for zellij, ("", "") when the
-// frame owns the terminal directly.
-func hostSession() (string, string) {
-	if s := strings.TrimSpace(os.Getenv("ZELLIJ_SESSION_NAME")); s != "" {
-		return "zellij", s
+func settingsFromStore(store *state.Store) rail.Settings {
+	if store == nil {
+		return rail.Settings{}
 	}
+	doc := store.Snapshot()
+	if doc.Settings == nil {
+		return rail.Settings{}
+	}
+	settings := *doc.Settings
+	settings.Toggle = append([]string(nil), settings.Toggle...)
+	settings.Agents = append([]string(nil), settings.Agents...)
+	return settings
+}
+
+func saveSettings(store *state.Store, settings rail.Settings) error {
+	return store.Update(func(doc *state.Document) error {
+		if settings.Empty() {
+			doc.Settings = nil
+			return nil
+		}
+		copy := settings
+		copy.Toggle = append([]string(nil), settings.Toggle...)
+		copy.Agents = append([]string(nil), settings.Agents...)
+		doc.Settings = &copy
+		return nil
+	})
+}
+
+// hostSession identifies the tmux session this frame is running inside, or ""
+// when the frame owns the terminal directly.
+func hostSession() string {
 	if os.Getenv("TMUX") != "" {
 		if s := strings.TrimSpace(tmux.Output("display-message", "-p", "#{session_name}")); s != "" {
-			return "", s
+			return s
 		}
 	}
-	return "", ""
+	return ""
 }
 
 func (m soloModel) Init() tea.Cmd { return m.rail.Init() }
@@ -159,8 +201,9 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil // View() re-reads the emulator
 
 	case term.ExitMsg:
-		// Evidence law: the last real frame stays until heal decides what
-		// replaces it on the next tick. No synthesized "dead" screen.
+		// Keep the last real frame, logical target, and current owned capability
+		// for typed heal; the lifecycle callback retries only older retirements.
+		m.vp.ChildExited()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -282,13 +325,13 @@ func (m soloModel) setFocus(f int) soloModel {
 }
 
 // viewportSize is the embedded terminal's cell size: everything right of the
-// divider, above the status row.
+// divider, above the footer chrome.
 func (m soloModel) viewportSize() (int, int) {
 	vw := m.w - rail.Width() - dividerCol
 	if vw < 1 {
 		vw = 1
 	}
-	bodyH := m.h - 1
+	bodyH := m.h - m.statusRows()
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -413,19 +456,18 @@ func truncate(s string, w int) string {
 
 // Run is bare `ghostmux`: the panel.
 func Run(args []string) error {
-	// tmux may not be installed at all — a zellij-only box is a first-class
-	// case for solo. Everything tmux-side is guarded on that, so the frame
-	// still runs (and the rail still lists zellij sessions).
+	// tmux may not be installed at all. Everything tmux-side is guarded on
+	// that, so the frame still runs and says so instead of dying.
 	_, tmuxErr := exec.LookPath("tmux")
 	hasTmux := tmuxErr == nil
 
+	// Hook registration is an optional low-latency accelerator. The rail's
+	// existing one-second fleet refresh remains authoritative when no server is
+	// running, a hook is unsupported, or lease creation itself fails. In
+	// particular, ghostmux never changes tmux's activity-monitoring scalars.
+	var hookLease *rail.HookLease
 	if hasTmux {
-		// The gutter needs activity tracking; the rail is the notification
-		// surface, so tmux's own messages stay off.
-		tmux.Run("set-option", "-g", "monitor-activity", "on")
-		tmux.Run("set-option", "-g", "visual-activity", "off")
-		rail.InstallHooks()
-		defer rail.RemoveHooks()
+		hookLease, _ = rail.NewHookLease()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -437,16 +479,17 @@ func Run(args []string) error {
 			p.Send(msg)
 		}
 	})
-	p = tea.NewProgram(newSolo(vp), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if hasTmux {
-		go rail.WaitLoop(ctx, p)
+	store, _ := state.OpenDefault()
+	p = tea.NewProgram(newSolo(vp, store), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	if hookLease != nil {
+		go hookLease.Listen(ctx, p)
 	}
 	_, err := p.Run()
 
 	cancel()
-	vp.w.Close() // SIGHUP the child; the inner session survives, as always
-	if hasTmux {
-		rail.RemoveHooks()
+	if hookLease != nil {
+		hookLease.Close()
 	}
-	return err
+	closeErr := vp.Close() // retire only this panel's retained exact capabilities
+	return errors.Join(err, closeErr)
 }

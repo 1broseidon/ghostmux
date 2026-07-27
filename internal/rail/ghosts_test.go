@@ -11,25 +11,6 @@ import (
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
-// withoutZellij pins the aux backend off. Tests that refresh() would otherwise
-// shell out to whatever zellij is really running on the box, and a fleet test
-// must assert on its fixture, not on the developer's sessions.
-func withoutZellij(t *testing.T) {
-	t.Helper()
-	orig := zellijPresent
-	zellijPresent = false
-	t.Cleanup(func() { zellijPresent = orig })
-}
-
-// withZellijList fakes the zellij session list (and marks zellij present).
-func withZellijList(t *testing.T, out string) {
-	t.Helper()
-	origList, origPresent := zellijList, zellijPresent
-	zellijPresent = true
-	zellijList = func() (string, error) { return out, nil }
-	t.Cleanup(func() { zellijList, zellijPresent = origList, origPresent })
-}
-
 // recordTmux swaps in a Runner that records every call and answers err to
 // new-session (nil = success).
 func recordTmux(t *testing.T, calls *[]string, newSessionErr error) {
@@ -86,7 +67,7 @@ func TestApplyGroupsSynthesizesDeclarationGhosts(t *testing.T) {
 	if !g.ghost || g.sess != "web" || g.label != "web" {
 		t.Fatalf("declared-but-dead member did not become a ghost: %+v", g)
 	}
-	if g.depth != 1 || g.group != "work" || !g.flat || g.backend != "" {
+	if g.depth != 1 || g.group != "work" || !g.flat {
 		t.Errorf("ghost row shape wrong: %+v", g)
 	}
 	if g.dir != "/home/g/Projects/web" {
@@ -140,7 +121,6 @@ func TestGhostGutterAdmitsNothingElse(t *testing.T) {
 // name in the declared dir and views it. Nothing is "restored" — a new session
 // with that name and dir is the entire claim the row was making.
 func TestSummonTmuxGhostStartsInRecordedDir(t *testing.T) {
-	withoutZellij(t)
 	dir := t.TempDir()
 	var calls []string
 	recordTmux(t, &calls, nil)
@@ -168,9 +148,24 @@ func TestSummonTmuxGhostStartsInRecordedDir(t *testing.T) {
 // the render and the keypress. That is the outcome we wanted, not an error —
 // but only when tmux confirms the name really is there.
 func TestSummonToleratesADuplicateSession(t *testing.T) {
-	withoutZellij(t)
 	var calls []string
-	recordTmux(t, &calls, fmt.Errorf("exit status 1")) // real tmux keeps its words on stderr
+	origRunner := tmux.Runner
+	tmux.Runner = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "new-session":
+			return "", fmt.Errorf("exit status 1")
+		case "list-sessions":
+			return "api\t$1\t0\t/tmp\t\n", nil
+		case "list-windows":
+			return "api\t$1\t@1\t1\tzsh\t1\t0\t0\t100\t\t\n", nil
+		case "list-panes":
+			return "api\t1\tzsh\n", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { tmux.Runner = origRunner })
 
 	vp := &fakeViewport{}
 	m := &railModel{vp: vp, collapsed: map[string]bool{}}
@@ -199,7 +194,6 @@ func TestSummonToleratesADuplicateSession(t *testing.T) {
 // promise (nothing was promised), so it starts at home and flashes nothing. A
 // dir that WAS recorded and has vanished says so.
 func TestSummonWithoutADirFallsBackToHome(t *testing.T) {
-	withoutZellij(t)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("no home dir on this box")
@@ -227,62 +221,12 @@ func TestSummonWithoutADirFallsBackToHome(t *testing.T) {
 	}
 }
 
-// TestSummonZellijExitedResurrectsWithoutCreating: zellij's EXITED sessions are
-// its own feature. Attaching IS the resurrection, so we relay it — creating
-// would throw the serialized session away.
-func TestSummonZellijExitedResurrectsWithoutCreating(t *testing.T) {
-	withZellijList(t, "myz [Created 1m ago] (EXITED - attach to resurrect)\n")
-	var created []string
-	origCreate := createAux
-	createAux = func(backend, name string) error {
-		created = append(created, backend+":"+name)
-		return nil
-	}
-	t.Cleanup(func() { createAux = origCreate })
-
-	vp := &fakeViewport{}
-	m := &railModel{vp: vp, collapsed: map[string]bool{}}
-	m.summonRow(railRow{ghost: true, flat: true, sess: "myz", label: "myz", backend: "zellij"})
-
-	if len(created) != 0 {
-		t.Errorf("resurrection went through create: %v", created)
-	}
-	if lock := vp.Lock(); lock.Backend != "zellij" || lock.Sess != "myz" {
-		t.Errorf("viewport not attached to the resurrected session: %+v", lock)
-	}
-}
-
-// TestSummonZellijDeclarationGhostCreates: a name zellij has forgotten
-// entirely leaves only our declaration, so a fresh session is what we owe.
-func TestSummonZellijDeclarationGhostCreates(t *testing.T) {
-	withZellijList(t, "No active zellij sessions found.\n")
-	var created []string
-	origCreate := createAux
-	createAux = func(backend, name string) error {
-		created = append(created, backend+":"+name)
-		return nil
-	}
-	t.Cleanup(func() { createAux = origCreate })
-
-	vp := &fakeViewport{}
-	m := &railModel{vp: vp, collapsed: map[string]bool{}}
-	m.summonRow(railRow{ghost: true, flat: true, sess: "myz", label: "myz", backend: "zellij"})
-
-	if len(created) != 1 || created[0] != "zellij:myz" {
-		t.Errorf("createAux calls = %v, want [zellij:myz]", created)
-	}
-	if vp.Lock().Sess != "myz" {
-		t.Errorf("created session not viewed: %+v", vp.Lock())
-	}
-}
-
 // TestPointRowRefusesGhosts is the belt to activateRow's braces: no path may
 // attach the viewport to a name with nothing behind it.
 func TestPointRowRefusesGhosts(t *testing.T) {
 	vp := &fakeViewport{}
 	m := &railModel{vp: vp, collapsed: map[string]bool{}}
 	m.pointRow(railRow{ghost: true, sess: "api", label: "api"})
-	m.pointRow(railRow{ghost: true, sess: "myz", label: "myz", backend: "zellij"})
 	if len(vp.points) != 0 {
 		t.Errorf("pointRow attached to a ghost: %v", vp.points)
 	}
@@ -292,10 +236,9 @@ func TestPointRowRefusesGhosts(t *testing.T) {
 // declaration — which is how the state file stops accumulating names the user
 // can no longer see. The prompt says the real verb.
 func TestXOnADeclarationGhostForgets(t *testing.T) {
-	withoutZellij(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\t/tmp\n",
+		"list-sessions": "api\t0\t/tmp\t\n",
 		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\n",
 	})
 	m := railModel{
@@ -332,56 +275,14 @@ func TestXOnADeclarationGhostForgets(t *testing.T) {
 	}
 }
 
-// TestXOnAZellijExitedGhostDeletes: there is no process to kill, but there IS
-// a serialized session — so the verb is delete, and the declaration goes with
-// it, because one x should fully remove what you can see.
-func TestXOnAZellijExitedGhostDeletes(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	withFakeRunner(t, map[string]string{"list-sessions": "", "list-windows": ""})
-	withZellijList(t, "myz [Created 1m ago] (EXITED - attach to resurrect)\n")
-	var deleted []string
-	origDelete := deleteAux
-	deleteAux = func(backend, name string) error {
-		deleted = append(deleted, backend+":"+name)
-		return nil
-	}
-	t.Cleanup(func() { deleteAux = origDelete })
-
-	m := railModel{
-		vp: &fakeViewport{}, collapsed: map[string]bool{},
-		groups: []Group{{Name: "work", Members: []string{"zellij:myz"}}},
-	}
-	m.refresh()
-	m.cursor = ghostAt(t, &m)
-
-	n1, _ := m.Update(key("x"))
-	m1 := n1.(railModel)
-	if m1.killKind != killDelete {
-		t.Fatalf("x on an EXITED zellij ghost armed %q, want delete", m1.killKind.verb())
-	}
-	if !strings.Contains(m1.hintLine(), "delete myz") {
-		t.Errorf("confirm prompt does not name the real action: %q", m1.hintLine())
-	}
-
-	n2, _ := m1.Update(key("y"))
-	m2 := n2.(railModel)
-	if len(deleted) != 1 || deleted[0] != "zellij:myz" {
-		t.Errorf("deleteAux calls = %v, want [zellij:myz]", deleted)
-	}
-	if groupOf(m2.groups, "zellij:myz") != "" {
-		t.Errorf("deleting the session left a pure declaration ghost: %+v", m2.groups)
-	}
-}
-
 // TestDirCaptureRecordsGroupedSessionsOnce: dirs are evidence, taken while the
 // session lives. Grouped only (an ungrouped session is cattle), and written
 // once per change — this runs on a 1s tick, so an unchanged path must not
 // rewrite the file.
 func TestDirCaptureRecordsGroupedSessionsOnce(t *testing.T) {
-	withoutZellij(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withFakeRunner(t, map[string]string{
-		"list-sessions": "api\t0\t/home/g/Projects/api\nstray\t0\t/tmp\n",
+		"list-sessions": "api\t0\t/home/g/Projects/api\t\nstray\t0\t/tmp\t\n",
 		"list-windows": "api\t1\tzsh\t1\t0\t0\t0\n" +
 			"stray\t1\tzsh\t1\t0\t0\t0\n",
 	})
@@ -413,6 +314,36 @@ func TestDirCaptureRecordsGroupedSessionsOnce(t *testing.T) {
 	m.refresh()
 	if _, err := os.Stat(groupsPath()); err == nil {
 		t.Errorf("an unchanged dir rewrote the state file")
+	}
+}
+
+// TestDirCaptureLastModeUsesActivePanePath: when GhostDir is last, the rail
+// records pane cwd evidence, not the session's launch path.
+func TestDirCaptureLastModeUsesActivePanePath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	orig := GhostDir()
+	t.Cleanup(func() { SetGhostDir(PersistGhostDir(orig)) })
+	SetGhostDir(GhostDirLast)
+
+	withFakeRunner(t, map[string]string{
+		"list-sessions": "api\t0\t/home/g/Projects/api\t\n",
+		"list-windows":  "api\t1\tzsh\t1\t0\t0\t0\t/tmp/live-cwd\n",
+	})
+	m := &railModel{
+		vp: &fakeViewport{}, collapsed: map[string]bool{},
+		groups: []Group{{Name: "work", Members: []string{"tmux:api"}}},
+		dirs:   map[string]string{},
+	}
+	m.refresh()
+	if m.dirs["tmux:api"] != "/tmp/live-cwd" {
+		t.Fatalf("last-mode dirs = %+v, want /tmp/live-cwd", m.dirs)
+	}
+
+	SetGhostDir(GhostDirLaunch)
+	m.dirs = map[string]string{}
+	m.refresh()
+	if m.dirs["tmux:api"] != "/home/g/Projects/api" {
+		t.Fatalf("launch-mode dirs = %+v, want launch path", m.dirs)
 	}
 }
 
@@ -453,7 +384,6 @@ func TestDirsRoundTripAndOldFilesLoad(t *testing.T) {
 // TestSummonGroupStartsOnlyTheDead: S is the fleet verb — one press for the
 // whole workspace. It must not touch what is already running.
 func TestSummonGroupStartsOnlyTheDead(t *testing.T) {
-	withoutZellij(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var calls []string
 	orig := tmux.Runner
@@ -461,9 +391,11 @@ func TestSummonGroupStartsOnlyTheDead(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		switch args[0] {
 		case "list-sessions":
-			return "api\t0\t/tmp\n", nil
+			return "api\t$1\t0\t/tmp\t\n", nil
 		case "list-windows":
-			return "api\t1\tzsh\t1\t0\t0\t0\n", nil
+			return "api\t$1\t@1\t1\tzsh\t1\t0\t0\t100\t0\t\n", nil
+		case "list-panes":
+			return "api\t1\tzsh\n", nil
 		}
 		return "", nil
 	}
@@ -505,7 +437,6 @@ func TestSummonGroupStartsOnlyTheDead(t *testing.T) {
 // already says it, and a key that silently did something else would be worse
 // than one that does nothing.
 func TestSummonGroupIsANoOpOffAGroupRow(t *testing.T) {
-	withoutZellij(t)
 	var calls []string
 	recordTmux(t, &calls, nil)
 	m := &railModel{vp: &fakeViewport{}, collapsed: map[string]bool{}}
@@ -535,15 +466,6 @@ func TestGhostHintLineSpeaksTheRealVerbs(t *testing.T) {
 	}
 	if w := len([]rune(strings.TrimSpace(hint))); w > railWidth {
 		t.Errorf("hint overflows the rail: %d cols, %q", w, hint)
-	}
-
-	zj := railRow{ghost: true, flat: true, label: "myz", sess: "myz", backend: "zellij"}
-	m2 := railModel{rows: []railRow{zj}, collapsed: map[string]bool{}}
-	hint2 := m2.hintLine()
-	for _, want := range []string{"resurrect", "x delete"} {
-		if !strings.Contains(hint2, want) {
-			t.Errorf("zellij ghost hint %q missing %q", hint2, want)
-		}
 	}
 
 	// A live row keeps the empty last line: the frame's bar owns the keymap.

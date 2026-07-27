@@ -1,5 +1,10 @@
 # After the reboot: the return path
 
+> **Scope note (2026-07-27):** ghostmux is tmux-only. The multi-backend
+> prototype (zellij beside tmux) was cut after the v0.3 panel shipped;
+> references to zellij, aux backends, or `z` in this document are historical
+> and no longer describe the product. ghostmux is the tmux fleet navigator.
+
 Status: proposal — two designs, mutually exclusive at the philosophy level,
 sharing most of their plumbing. Written 2026-07-24, on top of `panel-flip`
 (`0ed2234`). Nothing here is built.

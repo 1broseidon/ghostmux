@@ -1,8 +1,6 @@
 package rail
 
-import (
-	"strings"
-)
+import "strings"
 
 // keyHelp is one line of the keymap: a key (as shown to the user) and its
 // description. keyHelpRows is the single source of truth for the rail's
@@ -29,31 +27,33 @@ func SetToggleKeys(keys ...string) {
 	toggleLabel, toggleAll = keys[0], strings.Join(keys, " or ")
 }
 
-// keyHelpRows is the single source of truth for the rail's keymap — the
-// frame's `?` overlay renders it (enforced by TestKeyHelpCoversBoundKeys).
+// keyHelpRows is the operator keymap — short on purpose. Page jumps, attention
+// cycling, and manual refresh are not taught here: j/k + the gutter cover
+// hunting, and the 1s tick already refreshes.
+//
 // `?` and `,` are the frame's own keys, not the rail's: the table documents
 // them anyway, because what a user needs from a keymap is every key that does
 // something here, not a map of which package handles it.
 func keyHelpRows() []keyHelp {
 	return []keyHelp{
-		{"j/k, ↓/↑", "move cursor"},
-		{"g/G", "first / last row"},
-		{"↵", "view in pane →"},
-		{"l/→", "focus viewport"},
-		{toggleLabel, "toggle rail ⇄ viewport"},
-		{"tab", "fold group / session"},
+		{"j/k, ↓/↑", "move"},
+		{"↵", "view / start ghost"},
+		{"h/l", "fold / preview"},
+		{"→", "focus viewport"},
+		{"`", "previous session"},
+		{"]", "oldest unseen ●/✓"},
+		{toggleLabel, "rail ⇄ viewport"},
+		{"n", "new session"},
 		{"a", "new group"},
-		{"J/K", "move into / within group"},
-		{"n", "new tmux session"},
-		{"z", "new zellij session"},
-		{"S", "start group's dead sessions"},
+		{"m, J/K", "organize"},
+		{"u", "undo"},
+		{"S", "start group's ghosts"},
 		{"x", "kill / ungroup / forget"},
-		{"/", "filter rows"},
-		{"r", "refresh now (auto: 1s)"},
-		{"d", "detach inner client"},
+		{"/", "filter"},
+		{"d", "detach"},
 		{"?", "help"},
 		{",", "settings"},
-		{"q", "quit rail"},
+		{"q", "quit"},
 	}
 }
 

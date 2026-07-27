@@ -16,8 +16,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/1broseidon/ghostmux/internal/rail"
 	"github.com/1broseidon/ghostmux/internal/term"
+	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
 type model struct {
@@ -82,7 +82,7 @@ func main() {
 	case len(args) == 1 && args[0] != "--":
 		// The same attach argv solo will exec — honors GHOSTMUX_TMUX_ARGS,
 		// so the spike can drive a scratch server too.
-		argv = rail.AttachArgv(args[0], "", false)
+		argv = tmux.AttachSessionArgv(args[0], "")
 	default:
 		fmt.Fprintln(os.Stderr, "usage: termspike <tmux-session> | termspike -- <cmd> [args]")
 		os.Exit(2)

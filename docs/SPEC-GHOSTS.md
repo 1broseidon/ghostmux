@@ -1,5 +1,10 @@
 # SPEC — Ghosts (Design A of docs/RETURN.md)
 
+> **Scope note (2026-07-27):** ghostmux is tmux-only. The multi-backend
+> prototype (zellij beside tmux) was cut after the v0.3 panel shipped;
+> references to zellij, aux backends, or `z` in this document are historical
+> and no longer describe the product. ghostmux is the tmux fleet navigator.
+
 Status: ready to build. Branch: `panel-flip` (on `0ed2234`). Design
 rationale lives in docs/RETURN.md §Design A; this file is the binding
 contract. Where they disagree, this file wins.

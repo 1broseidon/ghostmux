@@ -8,38 +8,49 @@ import (
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
+// rowValidity records whether a backend row comes from the latest successful
+// query, a retained snapshot after an outage, or a declaration whose backend
+// has never been validated. The zero value is fresh so pure row builders and
+// state-only group rows retain their existing behavior.
+type rowValidity uint8
+
+const (
+	rowFresh rowValidity = iota
+	rowStale
+	rowUnvalidated
+)
+
 // railRow is one line of the rail: a session or one of its windows. The
-// attention marks are booleans; the 2-char gutter is derived from them by
-// priority (bell > done > activity > in-viewport).
+// attention marks are booleans; the gutter is derived from them and validity.
 type railRow struct {
 	depth int // tree level: group 0, its sessions 1, their windows 2;
 	// ungrouped sessions stay at 0 with windows at 1
-	isGroup bool   // a user-made folder, not anything the muxes reported
-	isWin   bool   // a window row (vs a session or group row)
-	group   string // name of the group holding this row, "" = ungrouped
-	count   int    // group rows: how many live sessions are inside
+	isGroup        bool   // a user-made folder, not anything the muxes reported
+	isWin          bool   // a window row (vs a session or group row)
+	group          string // name of the group holding this row, "" = ungrouped
+	count          int    // group rows: how many live sessions are inside
+	uncertainCount int    // group rows: members whose backend state is unknown
 
-	// ghost marks a declared name that is not running: either a group member
-	// with no session behind it, or a zellij session zellij itself lists as
-	// EXITED. Both halves are facts — the declaration and the absence — and a
-	// ghost asserts nothing beyond them, which is why it carries no other mark.
+	// ghost marks a declared name that is authoritatively not running.
 	ghost      bool
-	ghostCount int    // group rows: how many ghosts are inside
+	ghostCount int    // group rows: how many authoritative ghosts are inside
 	dir        string // ghost rows: where a summon would start it, "" if unknown
+	validity   rowValidity
 
-	label     string
-	sess      string
-	window    string // window index (depth-1 rows and flat session rows)
-	active    bool   // tmux's current window of its session
-	attached  bool   // session attached by an outside client (session rows)
-	bell      bool   // ● window_bell_flag
-	done      bool   // ✓ @ghostmux_done (D5)
-	act       bool   // ~ window_activity_flag
-	inView    bool   // ▸ locked in the viewport
-	collapsed bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
-	flat      bool   // single-window session rendered as one row, no children
-	cmd       string // flat rows: the window's foreground command, shown dim
-	backend   string // "" = tmux; e.g. "zellij" for other multiplexers
+	label      string
+	sess       string
+	window     string // window index (depth-1 rows and flat session rows)
+	active     bool   // tmux's current window of its session
+	attached   bool   // session attached by an outside client (session rows)
+	bell       bool   // ● window_bell_flag
+	done       bool   // ✓ @ghostmux_done (D5)
+	act        bool   // ~ window_activity_flag
+	activityAt int64  // #{window_activity}: when this window last saw output
+	inView     bool   // ▸ locked in the viewport
+	collapsed  bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
+	flat       bool   // single-window session rendered as one row, no children
+	cmd        string // flat rows: the window's foreground command, shown dim
+	instanceID string // stable tmux session ID captured with this row
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -79,6 +90,16 @@ func AddAgentCmds(cmds []string) {
 	}
 }
 
+// SetExtraAgentCmds replaces the user-added detection names exactly.
+func SetExtraAgentCmds(cmds []string) {
+	for cmd := range agentCmds {
+		if !builtinAgentCmds[cmd] {
+			delete(agentCmds, cmd)
+		}
+	}
+	AddAgentCmds(cmds)
+}
+
 // BuiltinAgentCmds and ExtraAgentCmds split the detection set for display:
 // what ghostmux knows on its own, and what this user added. Both sorted, so
 // the pane does not reshuffle between renders.
@@ -116,6 +137,11 @@ func sortedKeys(m map[string]bool) []string {
 // gutter returns up to two attention glyphs, highest priority first:
 // ● bell > ✓ done > ~ activity > ▸ in-viewport.
 func (r railRow) gutter() string {
+	// Unknown backend state suppresses every cached mark and every absence
+	// assertion. The question mark is provenance, not another attention mark.
+	if !r.isGroup && r.validity != rowFresh {
+		return "?"
+	}
 	// A ghost's whole story is "declared, not running". ○ says it, and nothing
 	// else may be said: every other glyph reports something a live session is
 	// doing, and there is no process here to be doing it.
@@ -164,9 +190,6 @@ func (r railRow) plainFiltered(query string) string {
 // flags list only the marks that are set (empty string if none).
 func (r railRow) marks() string {
 	sess := r.sess
-	if r.backend != "" {
-		sess = r.backend + ":" + r.sess // backend-qualified row identity
-	}
 	win := ""
 	if r.depth == 1 || r.flat {
 		win = r.window
@@ -174,6 +197,9 @@ func (r railRow) marks() string {
 	var flags []string
 	if r.ghost {
 		flags = append(flags, "ghost")
+	}
+	if r.validity != rowFresh {
+		flags = append(flags, "uncertain")
 	}
 	if r.bell {
 		flags = append(flags, "bell")
@@ -190,9 +216,21 @@ func (r railRow) marks() string {
 	return fmt.Sprintf("%s|%s|%s", sess, win, strings.Join(flags, ","))
 }
 
-// railRows is the live-tmux entry point: fetch the fleet and build the tree.
+// railRows is the compatibility live-tmux entry point used by focused row
+// tests. Interactive refresh and rail once surface tmux.Query errors.
 func railRows(hub string, v ViewState) []railRow {
-	return buildRows(hub, v, tmux.Sessions(), tmux.Windows())
+	snapshot, err := tmux.Query()
+	if err != nil {
+		return nil
+	}
+	return buildRows(hub, v, snapshot.Sessions, snapshot.Windows)
+}
+
+func stampValidity(rows []railRow, validity rowValidity) []railRow {
+	for i := range rows {
+		rows[i].validity = validity
+	}
+	return rows
 }
 
 // buildRows renders sessions and their windows into rail rows, excluding the
@@ -202,8 +240,8 @@ func railRows(hub string, v ViewState) []railRow {
 func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.Window) []railRow {
 	var rows []railRow
 	for _, s := range sessions {
-		if s.Name == hub || strings.HasPrefix(s.Name, gmViewPrefix) {
-			continue // gm-view-* shadows are viewport plumbing, not fleet
+		if s.Name == hub || tmux.IsOwnedView(s) {
+			continue // exact owned shadows are viewport plumbing, not fleet
 		}
 		// "Attached" means attached ELSEWHERE: the viewport's own nested
 		// client doesn't count, or every viewed session would show ●.
@@ -211,7 +249,10 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 		if s.Name == v.Sess {
 			attached = s.Clients > 1
 		}
-		sessRow := railRow{depth: 0, label: s.Name, sess: s.Name, attached: attached}
+		sessRow := railRow{
+			depth: 0, label: s.Name, sess: s.Name, attached: attached,
+			instanceID: s.SessionID,
+		}
 		var winRows []railRow
 		var aggBell, aggDone, aggAct, aggView bool
 		var sessWins []tmux.Window
@@ -232,8 +273,10 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 			row := railRow{
 				depth: 0, flat: true, label: s.Name, sess: s.Name,
 				window: w.Index, attached: attached, active: w.Active,
-				bell: w.Bell, done: w.Done, act: w.Activity,
-				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
+				instanceID: s.SessionID,
+				bell:       w.Bell, done: w.Done, act: w.Activity,
+				activityAt: w.ActivityAt,
+				inView:     isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
 			}
 			suppressViewedMarks(&row)
 			rows = append(rows, row)
@@ -244,7 +287,9 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 			row := railRow{
 				depth: 1, isWin: true, label: w.Index + ":" + w.Name,
 				sess: s.Name, window: w.Index, active: w.Active,
-				bell: w.Bell, done: w.Done, act: w.Activity, inView: inView,
+				instanceID: s.SessionID,
+				bell:       w.Bell, done: w.Done, act: w.Activity, inView: inView,
+				activityAt: w.ActivityAt,
 			}
 			suppressViewedMarks(&row)
 			winRows = append(winRows, row)
@@ -332,8 +377,8 @@ func matchesFilter(r railRow, query string) bool {
 
 // suppressViewedMarks drops attention marks on the row the viewport is
 // showing — you're looking at it, so nothing there needs attention. This also
-// covers grouped (gm-view-*) attaches, where tmux's native alert flags don't
-// clear on the origin session because no client displays its own winlink.
+// covers grouped attaches, where tmux's native alert flags don't clear on the
+// origin session because no client displays its own winlink.
 func suppressViewedMarks(r *railRow) {
 	if r.inView {
 		r.bell, r.done, r.act = false, false, false
@@ -344,8 +389,8 @@ func suppressViewedMarks(r *railRow) {
 // the explicitly locked window, or the whole session is locked and this is its
 // active window.
 func isViewed(v ViewState, sess, window string, active bool) bool {
-	if v.Backend != "" || v.Sess != sess {
-		return false // aux-backend locks never mark tmux rows
+	if v.Sess != sess {
+		return false
 	}
 	return v.Win == window || (v.Win == "" && active)
 }
@@ -367,17 +412,32 @@ func newDoneTracker() *doneTracker {
 	return &doneTracker{last: map[paneKey]string{}}
 }
 
+// reset breaks command-transition continuity across a backend outage. The
+// first recovered snapshot seeds a new baseline instead of inventing a direct
+// transition across an interval ghostmux could not observe.
+func (dt *doneTracker) reset() {
+	if dt != nil {
+		dt.last = map[paneKey]string{}
+	}
+}
+
 // observe records the current per-pane commands and, for each non-shell→shell
 // transition, marks the window done unless suppress(sess, window) is true
 // (session viewed in the viewport or attached elsewhere). The hub session is
 // never tracked. Panes that vanished are forgotten so a later reuse of the same
 // slot does not read as a transition against a stale command.
-func (dt *doneTracker) observe(windows []tmux.Window, hub string, suppress func(sess, window string) bool) {
+func (dt *doneTracker) observe(windows []tmux.Window, sessions []tmux.Session, hub string, suppress func(sess, window string) bool) {
+	owned := map[string]bool{}
+	for _, session := range sessions {
+		if tmux.IsOwnedView(session) {
+			owned[session.Name] = true
+		}
+	}
 	seen := map[paneKey]bool{}
 	for _, w := range windows {
-		// Skip the hub and gm-view-* shadows — grouped sessions list the
-		// same shared panes again and would double-fire transitions.
-		if w.Session == hub || strings.HasPrefix(w.Session, gmViewPrefix) {
+		// Exact owned shadows list their group's shared panes again and would
+		// double-fire transitions. Prefix-only legacy sessions remain real.
+		if w.Session == hub || owned[w.Session] {
 			continue
 		}
 		for i, cmd := range w.PaneCmds {

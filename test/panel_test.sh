@@ -5,7 +5,8 @@
 set -u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-TA="-L gm-solo -f /dev/null"
+SOCK=gm-solo
+TA="-L $SOCK -f /dev/null"
 BIN=$(mktemp -d)/ghostmux
 FAIL=0
 
@@ -29,15 +30,43 @@ cleanup
 # last, so the rail's cursor starts on alpha).
 tmux $TA new-session -d -s alpha -x 80 -y 20
 tmux $TA new-session -d -s zdriver -x 120 -y 32
+# User-owned tmux state is an acceptance fixture, not scratch space for the
+# panel. These values are deliberately the opposite of ghostmux's old writes,
+# and [133] is deliberately occupied.
+tmux $TA set-option -g monitor-activity off
+tmux $TA set-option -g visual-activity on
+tmux $TA set-hook -g 'alert-bell[133]' 'display-message "user-133"'
 tmux $TA send-keys -t zdriver "GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
 sleep 2.5
 
 cap() { tmux $TA capture-pane -p -t zdriver; }
 send() { tmux $TA send-keys -t zdriver "$@"; sleep "${SLEEP:-1.5}"; }
+# Membership and current directory evidence use the same qualified key. Stop
+# before dirs so an undo that correctly preserves evidence is not mistaken for
+# a declaration that survived.
+has_member() { sed '/^[[:space:]]*"dirs"/,$d' "$1" | grep -Fq "\"$2\""; }
+
+# --- additive tmux lease and untouched user globals ---
+MONITOR_DURING=$(tmux $TA show-options -gv monitor-activity 2>/dev/null)
+VISUAL_DURING=$(tmux $TA show-options -gv visual-activity 2>/dev/null)
+if [ "$MONITOR_DURING" = "off" ] && [ "$VISUAL_DURING" = "on" ]; then
+  pass "tmux lease: monitor/visual globals untouched while running"
+else fail "tmux lease: globals changed while running ($MONITOR_DURING/$VISUAL_DURING)"; fi
+# tmux 3.4 splits global hooks across session (-g) and window (-gw)
+# scopes; window-renamed exists only in the latter listing.
+HOOKS_DURING=$({ tmux $TA show-hooks -g; tmux $TA show-hooks -gw; } 2>/dev/null)
+if echo "$HOOKS_DURING" | grep -q 'alert-bell\[133\].*user-133'; then
+  pass "tmux lease: occupied user hook [133] untouched while running"
+else fail "tmux lease: user hook [133] changed while running"; echo "$HOOKS_DURING" | grep alert-bell; fi
+LEASE_CHANNELS=$(echo "$HOOKS_DURING" | grep -oE 'ghostmux-refresh-v1-[0-9]+-[0-9a-f]{32}' | sort -u)
+LEASE_COUNT=$(echo "$HOOKS_DURING" | grep -c 'ghostmux-refresh-v1-' || true)
+if [ -n "$LEASE_CHANNELS" ] && [ "$(echo "$LEASE_CHANNELS" | wc -l)" -eq 1 ] && [ "$LEASE_COUNT" -eq 8 ]; then
+  pass "tmux lease: one complete tokenized eight-hook panel lease exists"
+else fail "tmux lease: expected one complete eight-hook lease (entries=$LEASE_COUNT channels=$LEASE_CHANNELS)"; fi
 
 # --- frame chrome ---
-if cap | grep -q "gmx"; then pass "bar: gmx identity block rendered"
-else fail "bar: no gmx block"; cap | tail -3; fi
+if cap | grep -q "gmx"; then pass "bar: gmx wordmark rendered"
+else fail "bar: no gmx wordmark"; cap | tail -3; fi
 
 if cap | grep -q "alpha"; then pass "rail: scratch session listed"
 else fail "rail: alpha row missing"; cap | head -10; fi
@@ -92,9 +121,11 @@ if cap | grep -q "alt+ctrl"; then pass "help: ? reports the real toggle key"
 else fail "help: ? does not show the bound toggle"; cap | head -18; fi
 if cap | grep -q "ghostmux · keys"; then pass "help: ? draws the overlay box with its title"
 else fail "help: no overlay title"; cap | head -18; fi
-if cap | grep -q "start group's dead sessions"; then
+if cap | grep -q "kill / ungroup / forget"; then
   pass "help: the longest keymap row renders un-truncated"
 else fail "help: keymap row truncated in the overlay"; cap | head -20; fi
+if cap | grep -q "oldest unseen"; then pass "help: the Return Queue key is documented"
+else fail "help: ] row missing from the overlay"; cap | head -20; fi
 # any key closes it — including a key the rail would otherwise act on
 send "j"
 if cap | grep -q "ghostmux · keys"; then fail "help: overlay survived a keypress"; cap | head -8
@@ -104,9 +135,9 @@ else fail "help: rail did not come back"; cap | head -10; fi
 
 # --- settings: a mode, because sections/fields honor the panes' contract ---
 send ","
-if cap | grep -q "Backends"; then pass "settings: , opened the sections list"
+if cap | grep -q "Fleet"; then pass "settings: , opened the sections list"
 else fail "settings: , did not open settings"; cap | head -12; fi
-if cap | grep -q "About"; then pass "settings: every section listed"
+if cap | grep -q "System"; then pass "settings: every section listed"
 else fail "settings: sections missing"; cap | head -12; fi
 # the fleet stays live underneath: a session made now must be there on the way out
 tmux $TA new-session -d -s settled -x 80 -y 20
@@ -125,13 +156,57 @@ else fail "detach: d did not idle the viewport"; cap | head -12; fi
 if tmux $TA has-session -t =alpha 2>/dev/null; then pass "detach: alpha survived (frame only, never the session)"
 else fail "detach: alpha was destroyed"; fi
 
-# --- heal loop guard: a session killed from outside must idle, not re-attach ---
-send "" Enter          # re-point at alpha
+# --- owned grouped views: unique, hidden, and exact-cleanup only ---
+# Prefix-only legacy sessions are user sessions unless the exact owner marker
+# binds their current name. Keep both an untagged and malformed one alive
+# through every automatic path below.
+tmux $TA new-session -d -s gm-view-legacy -x 80 -y 20
+tmux $TA new-session -d -s gm-view-malformed -x 80 -y 20
+tmux $TA set-option -t gm-view-malformed @ghostmux_view_owner v1:someone-else
+sleep 1.5
+if cap | grep -q "gm-view-legacy" && cap | grep -q "gm-view-malformed"; then
+  pass "ownership: untagged/malformed gm-view sessions remain visible"
+else fail "ownership: legacy prefix sessions were hidden"; cap | head -14; fi
+
+# An outside client makes alpha require a grouped viewport. It runs in a
+# throwaway tmux session on the same scratch server.
+tmux $TA new-session -d -s watcher -x 80 -y 20
+tmux $TA send-keys -t watcher "env -u TMUX -u TMUX_PANE tmux -L $SOCK attach-session -t alpha" Enter
+sleep 1.5
+send "" Enter
+VIEW1=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}' 2>/dev/null |
+  awk '$1 ~ /^gm-view-/ && $2 == "v1:" $1 {print $1}' | head -1)
+if [ -n "$VIEW1" ]; then pass "ownership: grouped attach created an exactly tagged shadow"
+else fail "ownership: no exactly tagged grouped shadow"; tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}'; fi
+if [ -n "$VIEW1" ] && ! cap | grep -q "$VIEW1"; then pass "ownership: valid owned shadow hidden from the rail"
+else fail "ownership: owned shadow visible in the rail"; cap | head -14; fi
+
+send "d"
+if [ -n "$VIEW1" ] && ! tmux $TA has-session -t "=$VIEW1" 2>/dev/null; then
+  pass "ownership: detach cleaned the exact owned shadow"
+else fail "ownership: detach left $VIEW1 behind"; fi
+if tmux $TA has-session -t =gm-view-legacy 2>/dev/null && tmux $TA has-session -t =gm-view-malformed 2>/dev/null; then
+  pass "ownership: detach preserved unowned legacy sessions"
+else fail "ownership: detach killed an unowned legacy session"; fi
+
+# A second attach to the same target must get a fresh name. Kill the ORIGINAL
+# target while the child still runs: heal must not let the shadow keep it alive.
+send "" Enter
+VIEW2=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}' 2>/dev/null |
+  awk '$1 ~ /^gm-view-/ && $2 == "v1:" $1 {print $1}' | head -1)
+if [ -n "$VIEW2" ] && [ "$VIEW2" != "$VIEW1" ]; then pass "ownership: repeated attach used a unique shadow"
+else fail "ownership: shadow name was reused ($VIEW1 -> $VIEW2)"; fi
 tmux $TA kill-session -t =alpha
 sleep 3
-if cap | grep -q "the rail is watching"; then pass "heal: externally-killed session idled the viewport"
-else fail "heal: viewport did not idle after its session was killed"; cap | head -12; fi
+if cap | grep -q "the rail is watching"; then pass "heal: externally-killed original target idled the viewport"
+else fail "heal: grouped shadow kept a killed target rendered"; cap | head -12; fi
+if [ -n "$VIEW2" ] && ! tmux $TA has-session -t "=$VIEW2" 2>/dev/null; then
+  pass "heal: target kill cleaned the owned shadow"
+else fail "heal: target-kill shadow survived ($VIEW2)"; fi
 if cap | grep -q "\[alpha\]"; then fail "heal: still showing a dead session"; else pass "heal: dead session no longer rendered"; fi
+if tmux $TA has-session -t =gm-view-legacy 2>/dev/null && tmux $TA has-session -t =gm-view-malformed 2>/dev/null; then
+  pass "ownership: target-kill cleanup preserved legacy sessions"
+else fail "ownership: target-kill cleanup killed a legacy session"; fi
 
 # --- quit ---
 send "q"
@@ -139,11 +214,28 @@ if cap | grep -q "the rail is watching"; then fail "quit: frame still painted af
 else pass "quit: q exited the frame"; fi
 if tmux $TA has-session -t =zdriver 2>/dev/null; then pass "quit: host session intact (the panel never kills sessions)"
 else fail "quit: host session died"; fi
-if tmux $TA show-hooks -g 2>/dev/null | grep -q "\[133\]"; then
-  fail "quit: ghostmux hooks left behind at [133]"
-else pass "quit: no [133] hooks left behind"; fi
+HOOKS_AFTER=$({ tmux $TA show-hooks -g; tmux $TA show-hooks -gw; } 2>/dev/null)
+if echo "$HOOKS_AFTER" | grep -q 'ghostmux-refresh-v1-'; then
+  fail "quit: tokenized ghostmux lease entries remained"
+else pass "quit: only ghostmux lease entries were removed"; fi
+if echo "$HOOKS_AFTER" | grep -q 'alert-bell\[133\].*user-133'; then
+  pass "quit: user hook [133] survived exact cleanup"
+else fail "quit: user hook [133] was removed or changed"; echo "$HOOKS_AFTER" | grep alert-bell; fi
+MONITOR_AFTER=$(tmux $TA show-options -gv monitor-activity 2>/dev/null)
+VISUAL_AFTER=$(tmux $TA show-options -gv visual-activity 2>/dev/null)
+if [ "$MONITOR_AFTER" = "off" ] && [ "$VISUAL_AFTER" = "on" ]; then
+  pass "quit: monitor/visual globals remain untouched"
+else fail "quit: globals changed after exit ($MONITOR_AFTER/$VISUAL_AFTER)"; fi
+if tmux $TA has-session -t =gm-view-legacy 2>/dev/null && tmux $TA has-session -t =gm-view-malformed 2>/dev/null; then
+  pass "ownership: panel exit preserved all unowned legacy sessions"
+else fail "ownership: panel exit killed an unowned legacy session"; fi
+# They proved survival; remove only as scratch-fixture cleanup before later
+# cursor/order-sensitive scenarios.
+tmux $TA kill-session -t =gm-view-legacy 2>/dev/null
+tmux $TA kill-session -t =gm-view-malformed 2>/dev/null
+tmux $TA kill-session -t =watcher 2>/dev/null
 
-# --- tmux-absent guard: a zellij-only box is a first-class case ---
+# --- tmux-absent guard: the frame must run and say so without tmux ---
 tmux $TA new-session -d -s notmux -x 100 -y 30
 tmux $TA send-keys -t notmux "PATH=/nonexistent-bin $BIN" Enter
 sleep 2
@@ -153,35 +245,10 @@ if echo "$NOTMUX" | grep -q "gmx"; then
 else fail "no-tmux: frame did not start without tmux"; echo "$NOTMUX" | head -6; fi
 tmux $TA send-keys -t notmux "q"; sleep 0.5
 
-# --- zellij as the viewport child: the multi-backend claim ---
-if command -v zellij >/dev/null 2>&1; then
-  ZS=gm-solo-zj
-  zellij delete-session "$ZS" --force >/dev/null 2>&1
-  zellij attach --create-background "$ZS" >/dev/null 2>&1
-  sleep 1
-  tmux $TA kill-session -t zdriver 2>/dev/null
-  tmux $TA new-session -d -s zdriver -x 120 -y 32
-  tmux $TA send-keys -t zdriver "GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
-  sleep 2.5
-  if cap | grep -q "$ZS"; then pass "zellij: session listed in the rail beside tmux"
-  else fail "zellij: session not listed"; cap | head -10; fi
-  # aux rows are appended last, so G lands on the zellij row
-  send "G"
-  send "" Enter
-  sleep 2
-  if cap | grep -Eq "Ctrl \+|Tab #1"; then pass "zellij: ↵ attached a zellij client in the viewport"
-  else fail "zellij: no zellij chrome after ↵"; cap | head -16; fi
-  send "d"
-  zellij delete-session "$ZS" --force >/dev/null 2>&1
-  tmux $TA send-keys -t zdriver "q"; sleep 0.5
-else
-  echo "SKIP: zellij not on PATH"
-fi
-
 # --- self-exclusion: the panel run INSIDE a session must not list its own host ---
-# This is what makes `tmux new -A -s gm ghostmux` safe: the panel is
-# stateless, so relaunching it rebuilds the cockpit — but only if ↵ can never
-# render the frame inside itself.
+# This is what makes `tmux new -A -s gm ghostmux` safe: relaunching rebuilds
+# live rows from the muxes and saved organization from state — but only if ↵
+# can never render the frame inside itself.
 tmux $TA kill-session -t zdriver 2>/dev/null
 tmux $TA new-session -d -s zdriver -x 120 -y 32
 tmux $TA new-session -d -s beta -x 80 -y 20
@@ -207,17 +274,44 @@ if cap | grep -q "work"; then pass "group: a created a named group folder"
 else fail "group: folder not rendered"; cap | head -10; fi
 
 # move a session up into the group (ungrouped rows sit below every group).
-# Filter to gamma first: the rail also lists the developer's real zellij
-# sessions — including EXITED ones, as ghosts — and those are appended last,
-# so counting from the bottom would grab somebody else's session.
+# Filter to gamma first so the cursor cannot land on an unrelated session.
 send "/"
 tmux $TA send-keys -t zdriver "gamma"; sleep 0.5
 send "" Enter
 send "g"
 send "j"
+# Modal movement is a draft: any number of previews, and Esc, write nothing.
+send "m"
+send "k"
+if cap | grep -q "moving gamma"; then pass "group: m shows the move-preview hint"
+else fail "group: move-preview hint missing"; cap | tail -4; fi
+if has_member "$XDG_STATE_HOME/ghostmux/groups.json" "tmux:gamma" 2>/dev/null; then
+  fail "group: preview wrote membership before drop"
+else pass "group: preview made no state write"; fi
+send "Escape"
+if has_member "$XDG_STATE_HOME/ghostmux/groups.json" "tmux:gamma" 2>/dev/null; then
+  fail "group: Esc persisted the discarded draft"
+else pass "group: Esc discarded the draft"; fi
+send "m"
+send "k"
+send "" Enter
+if has_member "$XDG_STATE_HOME/ghostmux/groups.json" "tmux:gamma" 2>/dev/null; then
+  pass "group: Enter dropped and persisted the preview"
+else fail "group: Enter did not persist the preview"; cat "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; fi
+send "u"
+if has_member "$XDG_STATE_HOME/ghostmux/groups.json" "tmux:gamma" 2>/dev/null; then
+  fail "group: u did not undo the dropped move"; cat "$XDG_STATE_HOME/ghostmux/groups.json"; cap | tail -4
+else pass "group: u undid the organization move"; fi
+# The immediate expert path remains available and uses the same one-step move.
 send "K"
 if [ -f "$XDG_STATE_HOME/ghostmux/groups.json" ]; then pass "group: membership persisted to the state file"
 else fail "group: no state file written"; fi
+if grep -q '"version": 1' "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; then
+  pass "group: state file uses schema version 1"
+else fail "group: state file has no schema version"; cat "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; fi
+if [ -f "$XDG_STATE_HOME/ghostmux/groups.json.bak" ] && [ -f "$XDG_STATE_HOME/ghostmux/groups.json.lock" ]; then
+  pass "group: backup and lock sidecars exist"
+else fail "group: backup or lock sidecar missing"; ls -la "$XDG_STATE_HOME/ghostmux" 2>/dev/null; fi
 if grep -q '"name": "work"' "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; then
   pass "group: state file names the group"
 else fail "group: state file malformed"; cat "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; fi
@@ -225,9 +319,11 @@ if grep -qE '"tmux:[a-z]+"' "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; 
   pass "group: K moved a session into the group"
 else fail "group: no member recorded"; cat "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; fi
 
-# fold the group, then relaunch: a folder that springs open is not a folder
-send "g"
-send ""  Enter
+# fold the group, then relaunch: a folder that springs open is not a folder.
+# After the K move the cursor sits on the moved member: h selects the group
+# header, a second h collapses it through the persisted fold path.
+send "h"
+send "h"
 if grep -q '"collapsed"' "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; then
   pass "group: fold state written to the state file"
 else fail "group: fold not persisted"; cat "$XDG_STATE_HOME/ghostmux/groups.json" 2>/dev/null; fi
@@ -268,9 +364,9 @@ sleep 2.5
 send "a"
 tmux $TA send-keys -t zdriver "fleet"; sleep 0.5
 send "" Enter
-# g/j, never G: the rail also lists whatever zellij sessions the developer
-# really has, and those are appended LAST. A test that lands on one of them by
-# counting from the bottom would group — and later kill — somebody's session.
+# g/j, never G: filtering first keeps the cursor off unrelated sessions. A
+# test that lands on one of them by counting from the bottom would group —
+# and later kill — somebody's session.
 send "g"
 send "j"
 send "K"
@@ -322,65 +418,6 @@ if grep -q '"tmux:ghosty"' "$GJSON" 2>/dev/null; then
   fail "ghost: state file still declares the forgotten member"; cat "$GJSON"
 else pass "ghost: declaration pruned from the state file"; fi
 send "q"; sleep 0.5
-
-# --- ghosts on zellij: same declaration, the backend's own honesty ---
-# NOTE: `zellij kill-session` leaves NO resurrectable row on zellij 0.44.3 —
-# it removes the serialized session with the process (probed). So this section
-# exercises the zellij ghost that IS reproducible: a declared member zellij no
-# longer lists at all, summoned back with `attach --create-background`. The
-# EXITED flavour (a session zellij still lists, resurrected by attaching) is
-# covered by unit tests, because no CLI command manufactures one.
-if command -v zellij >/dev/null 2>&1; then
-  ZG=gm-ghost-zj
-  ZSTATE=$(mktemp -d)
-  ZRUN="XDG_STATE_HOME='$ZSTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN"
-  ZJSON="$ZSTATE/ghostmux/groups.json"
-  zellij delete-session "$ZG" --force >/dev/null 2>&1
-  zellij attach --create-background "$ZG" >/dev/null 2>&1
-  sleep 1
-  tmux $TA kill-session -t zdriver 2>/dev/null
-  tmux $TA new-session -d -s zdriver -x 120 -y 32
-  tmux $TA send-keys -t zdriver "$ZRUN" Enter
-  sleep 2.5
-  send "a"
-  tmux $TA send-keys -t zdriver "zfleet"; sleep 0.5
-  send "" Enter
-  # Filter to OUR session first: j only stops on matching rows, so the cursor
-  # cannot land on a zellij session this test did not create.
-  send "/"
-  tmux $TA send-keys -t zdriver "$ZG"; sleep 0.5
-  send "" Enter
-  send "g"
-  send "j"
-  send "K"
-  if grep -q "\"zellij:$ZG\"" "$ZJSON" 2>/dev/null; then
-    pass "ghost/zellij: a zellij session can be declared into a group"
-  else fail "ghost/zellij: membership not recorded"; cat "$ZJSON" 2>/dev/null; fi
-
-  send "q"; sleep 0.5
-  zellij kill-session "$ZG" >/dev/null 2>&1
-  sleep 1
-  tmux $TA send-keys -t zdriver "$ZRUN" Enter
-  sleep 2.5
-  if cap | grep -qE "$ZG.*○"; then pass "ghost/zellij: dead member renders as a ○ row"
-  else fail "ghost/zellij: no ghost row after the session died"; cap | head -10; fi
-
-  send "/"
-  tmux $TA send-keys -t zdriver "$ZG"; sleep 0.5
-  send "" Enter
-  send "g"
-  send "j"
-  send "" Enter
-  sleep 2
-  if zellij list-sessions --no-formatting 2>/dev/null | grep -q "^$ZG "; then
-    pass "ghost/zellij: ↵ summoned the session back onto its own backend"
-  else fail "ghost/zellij: ↵ did not bring the session back"; cap | head -12; fi
-  send "q"; sleep 0.5
-  zellij delete-session "$ZG" --force >/dev/null 2>&1
-else
-  echo "SKIP: zellij not on PATH (ghost section)"
-fi
-
 
 echo
 [ $FAIL -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"

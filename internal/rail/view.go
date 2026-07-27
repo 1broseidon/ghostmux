@@ -9,7 +9,7 @@ import (
 // Gruvbox Dark Hard hex table, per SPEC.md §4 — the ONLY colors allowed in
 // the rail. Hex, not ANSI numbers: ghostty renders truecolor.
 const (
-	hexTitleAccent  = "#fe8019" // ▍ / running / in-view ▸
+	hexTitleAccent  = "#fe8019" // selected ▎ / in-view ▸
 	hexTitleName    = "#8ec07c" // "ghostmux" / in-view session name
 	hexTitleTail    = "#928374" // hints / dim / collapse arrows
 	hexSessionName  = "#ebdbb2" // session name, not in view
@@ -26,6 +26,7 @@ var (
 	styHint     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleTail))
 	styBell     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell)).Bold(true)
 	styError    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBell))
+	styInfo     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexTitleName))
 	styActivity = lipgloss.NewStyle().Foreground(lipgloss.Color(hexActivity))
 )
 
@@ -77,7 +78,11 @@ func (m railModel) View() string {
 
 	vis := m.visible()
 	if len(vis) == 0 {
-		b.WriteString(emptyStateBody(treeHeight))
+		if m.backendStatus() != "" {
+			b.WriteString(unavailableStateBody(treeHeight))
+		} else {
+			b.WriteString(emptyStateBody(treeHeight))
+		}
 	} else {
 		b.WriteString(treeBody(vis, m.cursor, m.blinkPhase, m.filterQuery, treeHeight))
 	}
@@ -86,21 +91,22 @@ func (m railModel) View() string {
 	return b.String()
 }
 
-// AttentionSummary is the fleet's unread state: how many sessions carry a bell
-// and how many finished a command unseen. The hosting frame renders it in its
-// own chrome (solo's bottom bar); the classic rail falls back to its hint line.
+// AttentionSummary is the fleet's unread state: how many live windows (or flat
+// sessions) carry a bell or finished unseen. Activity (~) is gutter-only.
+// Aggregates are navigation stand-ins, not a second census.
 func (m Model) AttentionSummary() (bells, done int) { return m.attention() }
 
 func (m railModel) attention() (int, int) {
 	var nBell, nDone int
 	for _, r := range m.rows {
-		if r.depth == 0 { // count once per session, aggregates included
-			if r.bell {
-				nBell++
-			}
-			if r.done {
-				nDone++
-			}
+		if !attentionLeaf(r) {
+			continue
+		}
+		if r.bell {
+			nBell++
+		}
+		if r.done {
+			nDone++
 		}
 	}
 	return nBell, nDone
@@ -113,11 +119,15 @@ func (m railModel) hintLine() string {
 	case modeFilter:
 		return " " + styActivity.Render("/") + m.input.View()
 	case modeCreate:
-		// Always name the backend being created on: `n` and `z` are different
-		// keys, so the prompt must say which one you pressed.
-		return " " + styHint.Render("new "+backendLabel(m.createBackend)+": ") + m.input.View()
+		return " " + styHint.Render("new tmux: ") + m.input.View()
 	case modeGroup:
 		return " " + styHint.Render("group: ") + m.input.View()
+	case modeMove:
+		if m.move == nil {
+			return ""
+		}
+		hint := "moving " + m.move.label + " · j/k preview · Enter drop · Esc cancel"
+		return " " + styHint.Render(truncateLabel(hint, railWidth-1))
 	case modeKillConfirm:
 		// One key, four destructions: say which one. Ungrouping is not killing,
 		// forgetting a declaration is not killing, and deleting a serialized
@@ -129,13 +139,23 @@ func (m railModel) hintLine() string {
 	if m.errorActive() {
 		return " " + styError.Render(m.errMsg)
 	}
+	if m.storageErr != "" {
+		return " " + styError.Render(m.storageErr)
+	}
+	if status := m.backendStatus(); status != "" {
+		return " " + styError.Render(status)
+	}
 	if m.viewportDead {
 		return " " + styHint.Render("↵ re-point viewport")
+	}
+	if m.infoActive() {
+		return " " + styInfo.Render(truncateLabel(m.infoMsg, railWidth-1))
 	}
 	// A ghost is the one row whose keys mean something different, and it is
 	// also the row where guessing is expensive — ↵ is about to CREATE
 	// something. Spend the last line saying where, and what x would take away.
-	if vis := m.visible(); m.cursor >= 0 && m.cursor < len(vis) && vis[m.cursor].ghost {
+	if vis := m.visible(); m.cursor >= 0 && m.cursor < len(vis) &&
+		vis[m.cursor].ghost && vis[m.cursor].validity == rowFresh {
 		return " " + styHint.Render(truncateLabel(ghostHint(vis[m.cursor]), railWidth-1))
 	}
 	// The frame draws the keymap and the attention summary in its bottom bar;
@@ -144,12 +164,8 @@ func (m railModel) hintLine() string {
 }
 
 // ghostHint is the ghost row's hint text: what ↵ and x will really do to THIS
-// ghost. The two backends get different words because they do different things
-// — tmux starts a new session, zellij resurrects its own serialized one.
+// ghost.
 func ghostHint(r railRow) string {
-	if r.backend != "" {
-		return "↵ resurrect · x delete"
-	}
 	const head, tail = "↵ start in ", " · x forget"
 	// The dir is what gets shortened, never the verbs: a hint that truncates
 	// "forget" into "for" is worse than one that doesn't say where.
@@ -160,8 +176,21 @@ func ghostHint(r railRow) string {
 	return head + truncateLeft(r.dir, room) + tail
 }
 
-// emptyStateBody renders the mockup screen-4 rail body when the tree is
-// empty (Task 7).
+// unavailableStateBody avoids claiming authoritative emptiness while any
+// enabled backend query is failing.
+func unavailableStateBody(height int) string {
+	lines := []string{"", "  backend unavailable", "", "  retrying automatically"}
+	var b strings.Builder
+	for i := 0; i < height; i++ {
+		if i < len(lines) {
+			b.WriteString(lines[i])
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// emptyStateBody renders the normal authoritative-empty rail body.
 func emptyStateBody(height int) string {
 	lines := []string{
 		"",
@@ -189,7 +218,7 @@ func newKeyHint(key, desc string) string {
 
 const railMarksWidth = 3
 
-// treeBody renders the scrollable session/window tree, rows 3..height-2.
+// treeBody renders the scrollable session/window tree.
 func treeBody(vis []railRow, cursor, blinkPhase int, filterQuery string, height int) string {
 	start, end, moreUp, moreDown := scrollWindow(len(vis), height, cursor)
 	var b strings.Builder
@@ -235,47 +264,71 @@ func itoa(n int) string {
 	return string(digits)
 }
 
+// treeRowPrefix is indent spaces plus the disclosure affordance. The selected
+// row replaces the leading margin cell with the focus block without changing
+// prefix width, so labels stay on the old 3/5/7 columns.
+type treeRowPrefix struct {
+	indent     string
+	disclosure string
+}
+
+// disclosureFor keeps the existing two-cell affordance and its width. Flat
+// session rows have no fold action, but retain two blank cells so labels stay
+// aligned with expanded and collapsed siblings.
+func disclosureFor(r railRow) string {
+	if r.isWin {
+		return ""
+	}
+	if !r.isGroup && r.flat {
+		return "  "
+	}
+	if r.collapsed {
+		return "▸ "
+	}
+	return "▾ "
+}
+
+// treePrefixFor restores quiet depth indent: groups and ungrouped sessions at
+// the root, grouped sessions one step in, windows two steps under their
+// session. No box-drawing genealogy — depth, disclosure, and the gutter
+// already carry the hierarchy.
+func treePrefixFor(r railRow) treeRowPrefix {
+	prefix := treeRowPrefix{disclosure: disclosureFor(r)}
+	switch {
+	case r.isGroup || (!r.isWin && r.group == ""):
+		// Root: margin only (owned by the edge cell).
+	case !r.isWin:
+		prefix.indent = "  "
+	case r.group == "":
+		prefix.indent = "    "
+	default:
+		prefix.indent = "      "
+	}
+	return prefix
+}
+
+func treeEdge(selected bool) (glyph, fg string) {
+	if selected {
+		return "▎", hexTitleAccent
+	}
+	return " ", hexCursorBg
+}
+
 // renderRow renders one tree row within the fixed railWidth budget: an
-// indent/arrow prefix, a truncated label, and up to two right-aligned gutter
-// marks (never truncated). Filter-dimmed rows render entirely in #504945
-// (marks too), in place — no reflow.
+// indent/disclosure prefix, a truncated label, and up to two right-aligned
+// gutter marks (never truncated). Filter-dimmed rows render labels and marks
+// entirely in #504945, in place — no reflow.
 func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) string {
 	// A ghost is dim for the same reason a filtered-out row is: it is present
 	// but not what is happening. It reuses the filter's dim rather than
 	// inventing a colour, because the rail's palette is fixed and a fourth
 	// shade of grey would say nothing the position and the ○ don't already.
-	dim := r.ghost || (filterQuery != "" && !matchesFilter(r, filterQuery))
-	dimHex := ghostDimHex(r.ghost, cursor)
+	dim := r.ghost || r.validity != rowFresh ||
+		(filterQuery != "" && !matchesFilter(r, filterQuery))
+	dimHex := ghostDimHex(r.ghost || r.validity != rowFresh, cursor)
 
-	// Three levels in 30 columns: a group folder, its sessions, their windows.
-	// Indents stay tight (1/3/5) because every column spent here is a column
-	// taken from the name, which is the part you actually read.
-	indent, arrow := " ", ""
-	switch {
-	case r.isGroup:
-		arrow = "▾ "
-		if r.collapsed {
-			arrow = "▸ "
-		}
-	case r.isWin:
-		indent = "     " // ungrouped windows
-		if r.group != "" {
-			indent = "       "
-		}
-	default: // session row
-		if r.group != "" {
-			indent = "   "
-		}
-		if r.flat {
-			arrow = "  " // no disclosure; keep names column-aligned with ▾ rows
-		} else {
-			arrow = "▾ "
-			if r.collapsed {
-				arrow = "▸ "
-			}
-		}
-	}
-	prefixWidth := len([]rune(indent)) + len([]rune(arrow))
+	prefix := treePrefixFor(r)
+	prefixWidth := 1 + lipgloss.Width(prefix.indent) + lipgloss.Width(prefix.disclosure)
 	labelWidth := railWidth - prefixWidth - railMarksWidth
 	if labelWidth < 1 {
 		labelWidth = 1
@@ -292,6 +345,9 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		}
 		if r.ghostCount > 0 {
 			suffix += " ○" + itoa(r.ghostCount)
+		}
+		if r.uncertainCount > 0 {
+			suffix += " ?" + itoa(r.uncertainCount)
 		}
 	}
 	if !r.isGroup && !r.isWin && r.attached {
@@ -348,9 +404,12 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		return fg
 	}
 
-	var arrowStyled string
-	if arrow != "" {
-		arrowStyled = rowStyle(dimFg(hexTitleTail), false, cursor).Render(arrow)
+	edge, edgeHex := treeEdge(cursor)
+	edgeStyled := rowStyle(edgeHex, false, cursor).Render(edge)
+	indentStyled := rowStyle(hexCursorBg, false, cursor).Render(prefix.indent)
+	disclosureStyled := ""
+	if prefix.disclosure != "" {
+		disclosureStyled = rowStyle(dimFg(hexTitleTail), false, cursor).Render(prefix.disclosure)
 	}
 	nameFg, nameBold := nameStyle(r)
 	if dim {
@@ -358,7 +417,7 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	// A group whose every member is a ghost is a declaration, not a fleet: dim
 	// the folder itself so the eye skips it exactly as it skips its rows.
-	if r.isGroup && r.count == 0 && r.ghostCount > 0 {
+	if r.isGroup && r.count == 0 && (r.ghostCount > 0 || r.uncertainCount > 0) {
 		nameFg, nameBold = ghostDimHex(true, cursor), false
 	}
 	nameStyled := rowStyle(nameFg, nameBold, cursor).Render(name)
@@ -390,9 +449,7 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	marksStyled := renderMarks(marks, dimMark, blinkPhase, cursor)
 
-	indentStyled := rowStyle(hexTitleTail, false, cursor).Render(indent)
-
-	return indentStyled + arrowStyled + nameStyled + suffixStyled + cmdStyled + dirStyled + padStyled + marksStyled
+	return edgeStyled + indentStyled + disclosureStyled + nameStyled + suffixStyled + cmdStyled + dirStyled + padStyled + marksStyled
 }
 
 // ghostDimHex is the dim a ghost renders in: the filter's #504945 — except on
@@ -447,6 +504,12 @@ func renderMarks(padded string, dimHex string, blinkPhase int, cursor bool) stri
 		switch ch {
 		case ' ':
 			b.WriteString(rowStyle(hexSessionName, false, cursor).Render(" "))
+		case '?':
+			fg := dimHex
+			if fg == "" {
+				fg = hexTitleTail
+			}
+			b.WriteString(rowStyle(fg, false, cursor).Render("?"))
 		case '○':
 			// The ghost glyph is never anything but dim: it reports an absence,
 			// and an absence must not compete with a live session's marks.

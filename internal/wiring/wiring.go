@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/1broseidon/ghostmux/internal/rail"
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
 
@@ -148,39 +149,69 @@ func CmdDoctor() error {
 	if path, err := exec.LookPath("tmux"); err == nil {
 		check("tmux", true, path+"  "+firstLine(runOut("tmux", "-V")))
 	} else {
-		check("tmux", false, "not installed — tmux sessions will not be listed")
-	}
-	if path, err := exec.LookPath("zellij"); err == nil {
-		check("zellij", true, path+"  "+firstLine(runOut("zellij", "--version")))
-	} else {
-		check("zellij", false, "not installed — zellij sessions will not be listed")
+		check("tmux", false, "not installed — the rail has nothing to list")
 	}
 
 	if n := len(strings.Fields(runOut("tmux", "list-sessions", "-F", "#{session_name}"))); n > 0 {
 		check("tmux sessions", true, fmt.Sprintf("%d visible to the rail", n))
 	}
 
-	checkStaleHooks(check)
+	checkRefreshLeases(check)
 
 	if !ok {
-		fmt.Println("\nghostmux runs with whatever is installed; each backend is listed\nonly to the extent it can prove its own state.")
+		fmt.Println("\nghostmux runs with what is installed; everything listed is only\nwhat tmux can prove about its own state.")
 	}
 	return nil
 }
 
-// checkStaleHooks looks for ghostmux's refresh hooks at index [133] left in a
-// tmux server by a crashed run. They are harmless but they fire run-shell on
-// every event, so a stale set is worth reporting.
-func checkStaleHooks(check func(label string, pass bool, detail string)) {
+// checkRefreshLeases recognizes only the exact versioned command/channel
+// grammar emitted by rail.HookLease. Entries are grouped by panel token. The
+// embedded PID is reporting evidence only: PID reuse can make a crashed lease
+// look active, and neither doctor nor cleanup ever authorizes deletion by PID.
+func checkRefreshLeases(check func(label string, pass bool, detail string)) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return
 	}
-	out := runOut("tmux", "show-hooks", "-g")
-	if strings.Contains(out, "[133]") {
-		check("stale hooks", false, "ghostmux hooks at [133] with no rail running — run ghostmux once to clear")
+	// Global hooks span session and window option scopes. One tmux command
+	// queue reports both; bare show-hooks -g omits window-renamed on tmux 3.4.
+	reportRefreshLeases(
+		runOut("tmux", "show-hooks", "-g", ";", "show-hooks", "-gw"),
+		processAlive,
+		check,
+	)
+}
+
+func reportRefreshLeases(out string, alive func(int) bool, check func(label string, pass bool, detail string)) {
+	leases := rail.RecognizeRefreshHookLeases(out)
+	if len(leases) == 0 {
+		check("refresh leases", true, "none")
 		return
 	}
-	check("stale hooks", true, "none")
+	for _, lease := range leases {
+		names := make([]string, len(lease.Entries))
+		for i, entry := range lease.Entries {
+			names[i] = entry.Name()
+		}
+		count := fmt.Sprintf("%d/%d entries", len(lease.Entries), lease.Expected)
+		if alive(lease.PID) && lease.Complete {
+			check("refresh lease", true, fmt.Sprintf("PID %d currently active · %s", lease.PID, count))
+			continue
+		}
+		if alive(lease.PID) {
+			detail := fmt.Sprintf("PID %d currently active · %s", lease.PID, count)
+			if len(lease.Missing) > 0 {
+				detail += " · missing " + strings.Join(lease.Missing, ", ")
+			} else {
+				detail += " · expected exactly one entry per hook"
+			}
+			check("incomplete refresh lease", false, detail)
+			continue
+		}
+		check(
+			"stale refresh lease", false,
+			fmt.Sprintf("PID %d not active · %s · inspect/unset %s", lease.PID, count, strings.Join(names, ", ")),
+		)
+	}
 }
 
 func runOut(name string, args ...string) string {
