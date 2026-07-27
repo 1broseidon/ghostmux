@@ -41,6 +41,10 @@ and keeps pressing until nothing does.
   cluster is the queue, counted by the same `AttentionSummary`.
 - `` ` `` (previous session) is the natural return ticket after a triage
   jump.
+- Agents enter the queue with no ghostmux-side work: `✓` from exiting to a
+  shell, `●` from any BEL written to an unwatched pane (see the README's
+  "Making agents ring the queue" for the Claude Code hook recipe, validated
+  live 2026-07-27).
 
 ## Key code
 

@@ -73,6 +73,38 @@ A grouped tmux session that stops becomes a ghost row. Starting it creates a new
 
 The Return Queue is orderable because tmux proves `#{window_activity}` per window: `]` selects the unseen `●`/`✓` window with the oldest timestamp, points the viewport at it, and lets the existing clearing paths (native bell clear, `@ghostmux_done` clear-on-view) remove it from the queue. There is no queue state to corrupt — the queue is re-derived from evidence every tick, and a fold never hides a queue entry.
 
+## Making agents ring the queue
+
+The queue's two entry marks map onto agent life without inventing anything:
+
+- `✓` needs no setup. It fires when a window's foreground command exits back
+  to a shell while the window is unwatched — any agent or job that runs to
+  completion enters the queue by itself.
+- `●` is tmux's own bell flag, set whenever a process writes the BEL byte
+  (`\a`) to an unwatched pane. This is the "needs you while still running"
+  signal — an agent waiting at a permission prompt has not exited, so `✓`
+  cannot catch it, but a bell can.
+
+Any tool can ring it (`long-job; printf '\a'`). For Claude Code, add hooks
+that write BEL to the pane's tty — hook stdout is captured by Claude Code, so
+the write must target the tty directly:
+
+```json
+{
+  "hooks": {
+    "Notification": [{"hooks": [{"type": "command",
+      "command": "printf '\\a' > \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{pane_tty}')\""}]}],
+    "Stop": [{"hooks": [{"type": "command",
+      "command": "printf '\\a' > \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{pane_tty}')\""}]}]
+  }
+}
+```
+
+Put this in `~/.claude/settings.json` to cover every session, or in a
+project's `.claude/settings.json` for just that workspace. `Notification`
+rings when the agent needs input; `Stop` rings when it finishes a turn.
+Viewing the window clears the mark, so drained entries do not come back.
+
 ## State and settings
 
 Groups and user settings share one JSON state file:
