@@ -351,8 +351,10 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 			suffix += " ?" + itoa(r.uncertainCount)
 		}
 	}
+	// ◆, not ● — the bell already owns the circle, and an attached marker
+	// wearing the same shape (in any color) reads as attention it isn't.
 	if !r.isGroup && !r.isWin && r.attached {
-		suffix = " ●"
+		suffix = " ◆"
 	}
 	nameWidth := labelWidth - len([]rune(suffix))
 	if nameWidth < 1 {
@@ -367,15 +369,16 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	// rows instead state the evidence: how long since the window last
 	// produced output (#{window_activity}) — a fact, not a verb like
 	// "working" or "idle", which would be exactly that inference.
-	cmdStr := ""
+	cmdStr, ageStr := "", ""
 	if r.flat && r.cmd != "" {
 		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
 		if rest >= 5 { // " · " + at least 2 chars of command
-			label := r.cmd
+			cmdStr = truncateLabel(r.cmd, rest-3)
 			if age := agentQuietAge(time.Now(), r.activityAt); age != "" && isAgentCmd(r.cmd) {
-				label += " " + age
+				if left := rest - 3 - len([]rune(cmdStr)) - 1; left >= len([]rune(age)) {
+					ageStr = age
+				}
 			}
-			cmdStr = truncateLabel(label, rest-3)
 		}
 	}
 
@@ -397,6 +400,9 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	cmdRaw := ""
 	if cmdStr != "" {
 		cmdRaw = " · " + cmdStr
+		if ageStr != "" {
+			cmdRaw += " " + ageStr
+		}
 	}
 	dirRaw := ""
 	if dirStr != "" {
@@ -443,6 +449,12 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		}
 		cmdStyled = rowStyle(dimFg(hexInactiveWin), false, cursor).Render(" · ") +
 			rowStyle(dimFg(cmdFg), false, cursor).Render(cmdStr)
+		if ageStr != "" {
+			// The age is a quiet fact beside the command, not part of its name:
+			// dimmer, so "agent 4m" cannot read as a command called "agent 4m".
+			cmdStyled += rowStyle(dimFg(hexCursorBg), false, cursor).Render(" ") +
+				rowStyle(dimFg(hexTitleTail), false, cursor).Render(ageStr)
+		}
 	}
 	dirStyled := ""
 	if dirStr != "" {

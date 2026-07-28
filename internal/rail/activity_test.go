@@ -135,7 +135,7 @@ func TestAgentQuietAge(t *testing.T) {
 		want string
 	}{
 		{0, ""},
-		{999970, ""}, // 30s: recent output is not news
+		{999970, ""},    // 30s: recent output is not news
 		{999000, "16m"}, // 1000s ago
 		{1000000 - 7200, "2h"},
 		{1000000 - 3*86400, "3d"},
@@ -143,5 +143,56 @@ func TestAgentQuietAge(t *testing.T) {
 		if got := agentQuietAge(now, tc.at); got != tc.want {
 			t.Errorf("agentQuietAge(%d) = %q, want %q", tc.at, got, tc.want)
 		}
+	}
+}
+
+// TestBellAckSuppressesUnclearableGroupedAttachFlag is the "bell that keeps
+// coming back" regression: a grouped (gm-view-*) attach can never clear the
+// origin winlink's bell flag, so without an ack the same seen bell resurfaces
+// every time the viewport points elsewhere. Viewing records the ack; the
+// persistent flag stays suppressed until output newer than the ack arrives.
+func TestBellAckSuppressesUnclearableGroupedAttachFlag(t *testing.T) {
+	bellWindow := func(at int64, bell bool) []tmux.Window {
+		w := activityWindow("beastie", "@3", "1", at)
+		w.Bell = bell
+		return []tmux.Window{w}
+	}
+	vp := &fakeViewport{}
+	m := railModel{vp: vp}
+
+	// Unseen bell rings.
+	rung := bellWindow(100, true)
+	m.observeActivity(rung)
+	if !rung[0].Bell {
+		t.Fatalf("unseen bell was suppressed: %+v ledger=%+v", rung[0], m.activity)
+	}
+
+	// Viewing the belled window records the acknowledgement.
+	vp.lock = ViewState{Sess: "beastie", Win: "1"}
+	m.observeActivity(bellWindow(100, true))
+	if m.activity["@3"].bellAck != 100 {
+		t.Fatalf("viewing did not ack the bell: ledger=%+v", m.activity)
+	}
+
+	// Point elsewhere; the flag persists with nothing new — suppressed.
+	vp.lock = ViewState{Sess: "other", Win: "1"}
+	stale := bellWindow(100, true)
+	m.observeActivity(stale)
+	if stale[0].Bell {
+		t.Fatalf("seen grouped-attach bell resurfaced: %+v ledger=%+v", stale[0], m.activity)
+	}
+
+	// New output past the ack re-arms the bell.
+	fresh := bellWindow(150, true)
+	m.observeActivity(fresh)
+	if !fresh[0].Bell {
+		t.Fatalf("new output did not re-arm the bell: %+v ledger=%+v", fresh[0], m.activity)
+	}
+
+	// A natively cleared flag needs no ledger help and stays clear.
+	cleared := bellWindow(150, false)
+	m.observeActivity(cleared)
+	if cleared[0].Bell {
+		t.Fatalf("cleared flag re-invented a bell: %+v", cleared[0])
 	}
 }

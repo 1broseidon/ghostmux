@@ -79,11 +79,32 @@ func settingsKeys() []barKey {
 	return []barKey{{"j/k", "section"}, {"↵", "edit"}, {"esc", "back"}}
 }
 
-// viewportKeys is the keymap while the viewport has focus. There is exactly
-// one: everything else belongs to the program you are looking at, and saying
-// so is the honest thing for the bar to do.
-func viewportKeys(toggle string) []barKey {
-	return []barKey{{toggle, "back to rail"}}
+// viewportKeys is the keymap while the viewport has focus: the one key that
+// works, then the frame's own answer to "what am I looking at". The inner
+// session's status line can lie about identity (tmux's default
+// status-left-length truncates "[gm-agent-00]" into "[gm-agent-" and the
+// window list glues onto it) — the ▸ label is the lock the frame actually
+// holds, so it cannot. It sheds first when width runs out; the toggle is the
+// lifeline and sheds last.
+func viewportKeys(toggle, viewing string) []barKey {
+	keys := []barKey{{toggle, "back to rail"}}
+	if viewing != "" {
+		keys = append(keys, barKey{"▸", viewing})
+	}
+	return keys
+}
+
+// viewingLabel is the frame's own answer to "what is in the viewport": the
+// exact session (and window) the viewport lock holds. Empty when idle.
+func (m soloModel) viewingLabel() string {
+	lock := m.vp.Lock()
+	if lock.Sess == "" {
+		return ""
+	}
+	if lock.Win != "" {
+		return lock.Sess + ":" + lock.Win
+	}
+	return lock.Sess
 }
 
 // statusRows is how many frame rows the footer chrome consumes.
@@ -123,7 +144,7 @@ func (m soloModel) captionLine(width int) string {
 	case m.settings != nil:
 		keys = settingsKeys()
 	case m.focus == focusViewport:
-		mark, keys = styWordmarkVp, viewportKeys(m.toggleLabel)
+		mark, keys = styWordmarkVp, viewportKeys(m.toggleLabel, m.viewingLabel())
 	}
 	left := mark.Render("▎gmx")
 	lw := lipgloss.Width(left)

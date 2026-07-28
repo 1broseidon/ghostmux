@@ -65,7 +65,7 @@ These keys apply while the rail has focus. Press `?` in the panel for the comple
 | `/`, `d` | Filter rows, or detach the viewport client. |
 | `?`, `,`, `q` | Open help, open settings, or quit the panel. |
 
-The attention gutter uses `●` for bell, `✓` for a foreground command returning to a shell while unwatched, `~` for activity, `▸` for the viewport target, `○` for a declared session that is not running, and `?` for rows whose state could not be validated this tick. The bottom bar's attention cluster is the Return Queue's depth.
+The attention gutter uses `●` for bell, `✓` for a foreground command returning to a shell while unwatched, `~` for activity, `▸` for the viewport target, `○` for a declared session that is not running, and `?` for rows whose state could not be validated this tick. A `◆` after a session name means an outside client is attached to it. The bottom bar's attention cluster is the Return Queue's depth; with the viewport focused, the bar also names the exact session the viewport holds.
 
 ## Ghosts and the Return Queue
 
@@ -122,7 +122,9 @@ Writes use a persistent `groups.json.lock` process lock, atomic replacement, and
 
 ## tmux integration and limitations
 
-Viewing a session that is already attached elsewhere uses a temporary `gm-view-*` grouped session so each client gets an independent view. Owned views retain one deliberate crash-only residual: if the ghostmux process dies after writing the exact `@ghostmux_view_owner` tag but before starting the attach client, that detached view can remain behind. Clean lifecycle paths retain and retry exact session-ID capabilities, but startup never sweeps `gm-view-*` names or prefixes because that could mutate an unowned session.
+Viewing a session that is already attached elsewhere uses a temporary `gm-view-*` grouped session so each client gets an independent view. Because no client displays the origin session's own window links in that mode, tmux never clears the origin's bell flag — ghostmux tracks the acknowledgement itself: a bell you have viewed stays cleared until that window produces new output.
+
+The inner session's own tmux status bar duplicates identity the rail already shows, and tmux's default `status-left-length 10` can truncate a session name into a misleading one (`[gm-agent-00]` renders as `[gm-agent-` glued to the window list). The frame's bottom bar names the viewport's exact session as the authoritative answer; if you want the inner bar gone entirely, `tmux set -g status off` is reversible and the rail replaces everything it showed. Owned views retain one deliberate crash-only residual: if the ghostmux process dies after writing the exact `@ghostmux_view_owner` tag but before starting the attach client, that detached view can remain behind. Clean lifecycle paths retain and retry exact session-ID capabilities, but startup never sweeps `gm-view-*` names or prefixes because that could mutate an unowned session.
 
 Queries are outage-safe. If tmux becomes unavailable, the panel keeps the last validated in-process snapshot, marks its rows with `?`, suppresses stale attention and ghost actions, and retries automatically. A declaration becomes a `○` ghost only after a successful query proves it absent. Attach, summon, kill, and forget actions stay disabled for uncertain rows; destructive confirmations are revalidated immediately before execution. `ghostmux rail once` has no cache: it prints rows from a successful query and exits with an error otherwise.
 
