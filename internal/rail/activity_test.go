@@ -150,8 +150,14 @@ func TestAgentQuietAge(t *testing.T) {
 // coming back" regression: a grouped (gm-view-*) attach can never clear the
 // origin winlink's bell flag, so without an ack the same seen bell resurfaces
 // every time the viewport points elsewhere. Viewing records the ack; the
-// persistent flag stays suppressed until output newer than the ack arrives.
+// persistent flag stays suppressed until output newer than the ack arrives —
+// and the departure redraw the panel itself causes does not count as newer.
 func TestBellAckSuppressesUnclearableGroupedAttachFlag(t *testing.T) {
+	clock := time.Unix(5000, 0)
+	origNow := activityNow
+	activityNow = func() time.Time { return clock }
+	t.Cleanup(func() { activityNow = origNow })
+
 	bellWindow := func(at int64, bell bool) []tmux.Window {
 		w := activityWindow("beastie", "@3", "1", at)
 		w.Bell = bell
@@ -182,7 +188,18 @@ func TestBellAckSuppressesUnclearableGroupedAttachFlag(t *testing.T) {
 		t.Fatalf("seen grouped-attach bell resurfaced: %+v ledger=%+v", stale[0], m.activity)
 	}
 
-	// New output past the ack re-arms the bell.
+	// Output arriving just after departure is the resize redraw the panel
+	// caused (a TUI repaints when the window resizes back). Absorbed: no
+	// bell, and the ack advances with it.
+	clock = clock.Add(time.Second)
+	redraw := bellWindow(120, true)
+	m.observeActivity(redraw)
+	if redraw[0].Bell || redraw[0].Activity {
+		t.Fatalf("departure redraw rang the panel's own doorbell: %+v ledger=%+v", redraw[0], m.activity)
+	}
+
+	// Past the settle window, genuinely new output re-arms the bell.
+	clock = clock.Add(viewSettleWindow)
 	fresh := bellWindow(150, true)
 	m.observeActivity(fresh)
 	if !fresh[0].Bell {
@@ -194,5 +211,36 @@ func TestBellAckSuppressesUnclearableGroupedAttachFlag(t *testing.T) {
 	m.observeActivity(cleared)
 	if cleared[0].Bell {
 		t.Fatalf("cleared flag re-invented a bell: %+v", cleared[0])
+	}
+}
+
+// TestDepartureRedrawDoesNotMarkActivity: the same absorption for ~ — leaving
+// a window resizes it, the program repaints, and that output must not mark
+// the row unread. Later output does.
+func TestDepartureRedrawDoesNotMarkActivity(t *testing.T) {
+	clock := time.Unix(9000, 0)
+	origNow := activityNow
+	activityNow = func() time.Time { return clock }
+	t.Cleanup(func() { activityNow = origNow })
+
+	vp := &fakeViewport{lock: ViewState{Sess: "beastie", Win: "1"}}
+	m := railModel{vp: vp}
+	m.observeActivity([]tmux.Window{activityWindow("beastie", "@5", "1", 100)})
+
+	// Leave; the redraw lands within the settle window.
+	vp.lock = ViewState{Sess: "other", Win: "1"}
+	clock = clock.Add(time.Second)
+	redraw := []tmux.Window{activityWindow("beastie", "@5", "1", 130)}
+	m.observeActivity(redraw)
+	if redraw[0].Activity || m.activity["@5"].unread {
+		t.Fatalf("departure redraw marked unread: %+v ledger=%+v", redraw[0], m.activity)
+	}
+
+	// Output after the settle window is real news again.
+	clock = clock.Add(viewSettleWindow)
+	later := []tmux.Window{activityWindow("beastie", "@5", "1", 160)}
+	m.observeActivity(later)
+	if !later[0].Activity || !m.activity["@5"].unread {
+		t.Fatalf("post-settle output was not marked: %+v ledger=%+v", later[0], m.activity)
 	}
 }

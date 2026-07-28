@@ -1,6 +1,21 @@
 package rail
 
-import "github.com/1broseidon/ghostmux/internal/tmux"
+import (
+	"time"
+
+	"github.com/1broseidon/ghostmux/internal/tmux"
+)
+
+// activityNow is the ledger's clock; injectable so tests control the settle
+// window deterministically.
+var activityNow = time.Now
+
+// viewSettleWindow is how long output after the viewport leaves a window is
+// attributed to the panel itself. Leaving resizes the window for whatever
+// client remains, and a TUI redraws on resize — output the panel caused, not
+// the program speaking. Real events inside this window are swallowed; that is
+// the bounded price of not ringing our own doorbell on every departure.
+const viewSettleWindow = 2 * time.Second
 
 // activityLedger is panel-local acknowledgement state. tmux's timestamp is
 // stable across linked-session aliases, so one entry represents the window
@@ -17,6 +32,11 @@ type activityLedgerEntry struct {
 	// "seen already". The ack records the seeing; the timestamp advancing
 	// past it is the evidence that something new happened since.
 	bellAck int64
+	// viewed records whether the previous observation saw this window in the
+	// viewport; the true→false edge is the moment the panel left it, which
+	// starts the settle window below.
+	viewed      bool
+	settleUntil time.Time
 }
 
 // observeActivity baselines new IDs, marks timestamp advances that happened
@@ -53,20 +73,34 @@ func (m *railModel) observeActivity(windows []tmux.Window) {
 		observed[window.WindowID] = value
 	}
 
+	now := activityNow()
 	next := make(activityLedger, len(observed))
 	for id, current := range observed {
 		previous, known := m.activity[id]
-		entry := activityLedgerEntry{last: current.last}
+		entry := activityLedgerEntry{last: current.last, viewed: current.viewed}
 		if known {
 			entry.unread = previous.unread
 			entry.bellAck = previous.bellAck
+			entry.settleUntil = previous.settleUntil
 			if current.last < previous.last {
 				// A stable tmux window ID should not regress. Retaining the high-water
 				// mark avoids manufacturing activity from a clock anomaly.
 				entry.last = previous.last
 			}
+			if previous.viewed && !current.viewed {
+				entry.settleUntil = now.Add(viewSettleWindow)
+			}
 			if !current.viewed && current.last > previous.last {
-				entry.unread = true
+				if now.Before(entry.settleUntil) {
+					// Departure redraw: the panel's own leaving produced this
+					// output. Absorb it — including into the bell ack, or the
+					// unclearable grouped-attach flag would re-arm itself.
+					if entry.bellAck > 0 {
+						entry.bellAck = entry.last
+					}
+				} else {
+					entry.unread = true
+				}
 			}
 		}
 		if current.viewed {
