@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/1broseidon/ghostmux/internal/state"
 )
 
 type leaseCheck struct {
@@ -68,5 +70,44 @@ func TestReportRefreshLeasesIgnoresOccupiedUserIndex(t *testing.T) {
 	)
 	if len(checks) != 1 || !checks[0].pass || checks[0].detail != "none" {
 		t.Fatalf("user hook was claimed as a lease: %+v", checks)
+	}
+}
+
+// TestCmdReachRoundTrip (PROTOTYPE): declare, list, re-declare, remove.
+func TestCmdReachRoundTrip(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	if err := CmdReach([]string{"add", "beastie", "gd@beastie"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := CmdReach([]string{"add", "api", "gd@beastie", "api-work"}); err != nil {
+		t.Fatalf("add with session: %v", err)
+	}
+	store, err := state.OpenDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reach := store.Snapshot().Reach
+	if len(reach) != 2 || reach[0].Session != "beastie" || reach[1].Session != "api-work" {
+		t.Fatalf("declared targets = %+v", reach)
+	}
+
+	// Re-adding a name replaces it rather than duplicating.
+	if err := CmdReach([]string{"add", "api", "other-host"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := CmdReach([]string{"rm", "beastie"}); err != nil {
+		t.Fatalf("rm: %v", err)
+	}
+	store2, err := state.Open(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reach = store2.Snapshot().Reach
+	if len(reach) != 1 || reach[0].Name != "api" || reach[0].Host != "other-host" {
+		t.Fatalf("after rm/replace = %+v", reach)
+	}
+	if err := CmdReach([]string{"rm", "ghost-target"}); err == nil {
+		t.Fatal("rm of unknown target did not error")
 	}
 }

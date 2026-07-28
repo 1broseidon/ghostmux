@@ -140,6 +140,10 @@ type railModel struct {
 	// dies the ghost can say where it will come back.
 	dirs map[string]string
 
+	// reach is the declared remote workspaces (PROTOTYPE), rendered as ↗ rows
+	// below the fleet.
+	reach []state.ReachTarget
+
 	lastViewed   viewRef // exact backend/session/window last followed by the cursor
 	currentView  viewRef // latest non-idle viewport session, including its window
 	previousView viewRef // prior backend-qualified session for the backtick toggle
@@ -161,10 +165,10 @@ func New(vp Viewport, stores ...*state.Store) Model {
 	if store == nil {
 		store, openErr = state.OpenDefault()
 	}
-	groups, collapsed, dirs := railState(store.Snapshot())
+	groups, collapsed, dirs, reach := railState(store.Snapshot())
 	m := Model{
 		vp: vp, store: store, groups: groups, collapsed: collapsed, dirs: dirs,
-		done: newDoneTracker(),
+		reach: reach, done: newDoneTracker(),
 	}
 	if openErr != nil || store.LoadError() != nil {
 		m.storageErr = "state read-only: " + store.Info().Status
@@ -311,6 +315,12 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		if vis := m.visible(); m.cursor < len(vis) {
 			row := vis[m.cursor]
+			if row.reach {
+				// Prototype boundary: declaring and forgetting reach targets
+				// is CLI-only until the shape settles.
+				m.flashInfo("reach: ghostmux reach rm " + row.sess)
+				return m, nil
+			}
 			if !row.isGroup && row.validity != rowFresh {
 				m.flashError(errBackendActionDisabled)
 				return m, nil
@@ -1044,7 +1054,22 @@ func (m *railModel) rebuildRows() {
 		snapshot := m.tmuxCache.snapshot
 		rows = stampValidity(buildRows(m.hub, lock, snapshot.Sessions, snapshot.Windows), m.tmuxValidity())
 	}
-	m.rows = applyGroups(rows, groups, m.dirs, m.tmuxValidity())
+	m.rows = append(applyGroups(rows, groups, m.dirs, m.tmuxValidity()), reachRows(m.reach)...)
+}
+
+// reachRows renders declared remote workspaces (PROTOTYPE) as flat rows at
+// the bottom of the rail: name, host in the dim command slot, ↗ gutter, no
+// marks — the rail proves nothing about the remote side.
+func reachRows(targets []state.ReachTarget) []railRow {
+	var rows []railRow
+	for _, t := range targets {
+		rows = append(rows, railRow{
+			depth: 0, flat: true, reach: true,
+			label: t.Name, sess: t.Name, cmd: t.Host,
+			reachHost: t.Host, reachSession: t.Session,
+		})
+	}
+	return rows
 }
 
 // backendStatus is persistent while an enabled query or viewport probe is
@@ -1187,6 +1212,13 @@ func (m *railModel) activateRow(r railRow) {
 		m.flashError(errBackendActionDisabled)
 		return
 	}
+	// A reach row summons a remote workspace: ssh in the viewport, nothing
+	// more. The panel makes no claim about what is on the other side.
+	if r.reach {
+		m.vp.PointRemote(r.sess, r.reachHost, r.reachSession)
+		m.refresh()
+		return
+	}
 	// A ghost has nothing to attach to yet, so ↵ means summon. It routes
 	// through here rather than through the key handler for the same reason
 	// folding does: the mouse must get the identical behaviour for free.
@@ -1251,8 +1283,8 @@ func summonDir(dir string) (string, bool) {
 
 // pointRow routes a row selection to the viewport attach.
 func (m *railModel) pointRow(r railRow) {
-	if r.isGroup {
-		return // a group is a shelf: there is nothing behind it to attach to
+	if r.isGroup || r.reach {
+		return // a shelf, or a remote target activateRow already routes
 	}
 	if r.ghost || r.validity != rowFresh {
 		return // no proven live process: never attach it

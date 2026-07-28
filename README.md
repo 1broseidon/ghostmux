@@ -113,6 +113,10 @@ project's `.claude/settings.json` for just that workspace. `Notification`
 rings when the agent needs input; `Stop` rings when it finishes a turn.
 Viewing the window clears the mark, so drained entries do not come back.
 
+## Reach rows (prototype)
+
+A declared remote workspace: `ghostmux reach add beastie gd@beastie work` puts a `↗ beastie` row at the bottom of the rail, and `Enter` runs `ssh -t gd@beastie -- tmux new-session -A -s work` in the viewport — a remote fleet member one keypress away, with no tmux-in-tmux nesting. Reach rows carry no attention marks: the rail proves nothing about the remote side, and it will not pretend otherwise. Manage declarations with `ghostmux reach add|rm|ls`; when the ssh session ends (detach or dropped link), the viewport idles and `Enter` reconnects deliberately. See `docs/SPEC-REACH.md` for the contract and the planned evidence-bearing v2.
+
 ## State and settings
 
 Groups and user settings share one JSON state file:

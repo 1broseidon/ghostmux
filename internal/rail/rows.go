@@ -52,6 +52,13 @@ type railRow struct {
 	flat       bool   // single-window session rendered as one row, no children
 	cmd        string // the window's foreground command (flat + window rows); shown dim on flat rows
 	instanceID string // stable tmux session ID captured with this row
+
+	// reach rows (PROTOTYPE): a declared remote workspace. The rail proves
+	// nothing about the remote side, so a reach row never carries marks and
+	// never joins the queue; ↵ runs ssh in the viewport, nothing more.
+	reach        bool
+	reachHost    string
+	reachSession string
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -169,6 +176,10 @@ func (r railRow) gutter() string {
 	// doing, and there is no process here to be doing it.
 	if r.ghost {
 		return "○"
+	}
+	// A reach row proves even less: only that it was declared. ↗ says "away".
+	if r.reach {
+		return "↗"
 	}
 	var g []rune
 	if r.bell {

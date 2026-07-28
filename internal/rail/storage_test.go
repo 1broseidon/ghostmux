@@ -6,7 +6,8 @@ func groupsPath() string { return state.DefaultPath() }
 
 func loadState() ([]Group, map[string]bool, map[string]string) {
 	store, _ := state.OpenDefault()
-	return railState(store.Snapshot())
+	groups, collapsed, dirs, _ := railState(store.Snapshot())
+	return groups, collapsed, dirs
 }
 
 func saveState(groups []Group, collapsed map[string]bool, dirs map[string]string) error {

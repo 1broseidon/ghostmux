@@ -74,6 +74,16 @@ func (s Settings) Empty() bool {
 		s.GhostDir == "" && s.CreateDir == ""
 }
 
+// ReachTarget is a declared remote workspace (PROTOTYPE): a tmux session on
+// a host reached over ssh. Like a ghost, it is a declaration — a name the
+// rail lists so one keypress can bring it into the viewport — but the rail
+// proves nothing about the remote side, so a reach row never carries marks.
+type ReachTarget struct {
+	Name    string `json:"name"`
+	Host    string `json:"host"`
+	Session string `json:"session"`
+}
+
 // Document is the complete state file. Version is set to CurrentVersion in
 // memory even when an unversioned legacy document was loaded.
 type Document struct {
@@ -82,6 +92,7 @@ type Document struct {
 	Collapsed []string          `json:"collapsed,omitempty"`
 	Dirs      map[string]string `json:"dirs,omitempty"`
 	Settings  *Settings         `json:"settings,omitempty"`
+	Reach     []ReachTarget     `json:"reach,omitempty"`
 }
 
 // Info describes the exact primary snapshot held by a Store and the backup
@@ -351,6 +362,7 @@ func cloneDocument(in Document) Document {
 		settings.Agents = append([]string(nil), in.Settings.Agents...)
 		out.Settings = &settings
 	}
+	out.Reach = append([]ReachTarget(nil), in.Reach...)
 	return out
 }
 
@@ -423,7 +435,8 @@ func decodeDocument(b []byte) (Document, bool, error) {
 	}
 
 	allowed := map[string]bool{
-		"version": true, "groups": true, "collapsed": true, "dirs": true, "settings": true,
+		"version": true, "groups": true, "collapsed": true, "dirs": true,
+		"settings": true, "reach": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -468,6 +481,11 @@ func decodeDocument(b []byte) (Document, bool, error) {
 			return Document{}, false, fmt.Errorf("settings: %w", err)
 		}
 		doc.Settings = &settings
+	}
+	if raw, ok := fields["reach"]; ok && !isJSONNull(raw) {
+		if err := decodeStrict(raw, &doc.Reach); err != nil {
+			return Document{}, false, fmt.Errorf("reach: %w", err)
+		}
 	}
 	return doc, legacy, nil
 }
