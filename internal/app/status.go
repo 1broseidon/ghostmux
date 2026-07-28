@@ -158,8 +158,8 @@ func (m soloModel) captionLine(width int) string {
 
 	// Keys fill the middle, dropped from the right as the terminal narrows —
 	// a truncated key hint is worse than an absent one. Remaining gap is plain
-	// ground: the floating rule above already carries the dotted texture, so a
-	// second ┈ run between keys and attention would just be noise.
+	// ground: the floating rule above already separates, so a second run
+	// between keys and attention would just be noise.
 	for n := len(keys); n >= 0; n-- {
 		mid, mw := renderKeys(keys[:n])
 		gap := width - lw - mw - rw
@@ -170,13 +170,15 @@ func (m soloModel) captionLine(width int) string {
 	return truncate(left, width)
 }
 
-// dottedRule is the floating separator above the caption — one ┈ band so the
-// footer reads as lifted off the frame, not another status strip.
+// dottedRule is the floating separator above the caption. A solid hairline,
+// not ┈: dashed box-drawing glyphs render with a different gap rhythm in
+// every font, and on some emulators the texture reads as damage rather than
+// design. The dim color and side inset do the "lifted, not a strip" work.
 func dottedRule(width int) string {
 	if width <= 0 {
 		return ""
 	}
-	return styBarLeader.Render(strings.Repeat("┈", width))
+	return styBarLeader.Render(strings.Repeat("─", width))
 }
 
 // floatPad places content in an inset band, filling the outer columns with
