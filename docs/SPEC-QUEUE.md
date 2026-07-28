@@ -16,7 +16,10 @@ and keeps pressing until nothing does.
 1. **Evidence, never inference.** Queue order is tmux's own
    `#{window_activity}` timestamp — the newest output the window ever
    produced, which for a `✓` window approximates "when it finished." No
-   panel-side clock, no arrival bookkeeping.
+   panel-side clock, no arrival bookkeeping. Agent windows (ambient
+   `agentCmds` foreground detection — the same evidence as the accent)
+   outrank plain jobs; oldest-first within each tier. A finished agent is
+   usually the next thing to steer; a finished build is usually just news.
 2. **No queue state.** The queue is re-derived from row evidence on every
    press. Membership is exactly what `AttentionSummary` counts: fresh live
    windows (or flat sessions) carrying `●` or `✓`. Activity (`~`) stays
@@ -31,8 +34,9 @@ and keeps pressing until nothing does.
 
 ## Mechanics
 
-- `]` (rail focus, normal mode): find the attention leaf with the minimum
-  `activityAt` among rows carrying `●` or `✓`; point the viewport at it;
+- `]` (rail focus, normal mode): among rows carrying `●` or `✓`, pick agent
+  leaves before plain ones, minimum `activityAt` within the tier; point the
+  viewport at it;
   flash `return · <target>`. If the viewport refuses the exact view, flash
   `view unavailable` and change nothing else. Empty queue flashes
   `queue empty` and never moves the viewport.

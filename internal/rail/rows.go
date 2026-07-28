@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
@@ -49,7 +50,7 @@ type railRow struct {
 	inView     bool   // ▸ locked in the viewport
 	collapsed  bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
 	flat       bool   // single-window session rendered as one row, no children
-	cmd        string // flat rows: the window's foreground command, shown dim
+	cmd        string // the window's foreground command (flat + window rows); shown dim on flat rows
 	instanceID string // stable tmux session ID captured with this row
 }
 
@@ -78,6 +79,27 @@ var builtinAgentCmds = func() map[string]bool {
 
 // isAgentCmd reports whether a foreground command is a recognized agent.
 func isAgentCmd(cmd string) bool { return agentCmds[cmd] }
+
+// agentQuietAge renders how long a window has been quiet, from tmux's own
+// #{window_activity} timestamp. Empty under a minute (recent output is not
+// news) and empty without evidence. Coarse units on purpose: this is a
+// glance, not a stopwatch.
+func agentQuietAge(now time.Time, activityAt int64) string {
+	if activityAt <= 0 {
+		return ""
+	}
+	d := now.Unix() - activityAt
+	switch {
+	case d < 60:
+		return ""
+	case d < 60*60:
+		return fmt.Sprintf("%dm", d/60)
+	case d < 24*60*60:
+		return fmt.Sprintf("%dh", d/(60*60))
+	default:
+		return fmt.Sprintf("%dd", d/(24*60*60))
+	}
+}
 
 // AddAgentCmds merges user-declared agent commands into the detection set.
 // Lowercased and deduped, because pane_current_command is what it is compared
@@ -284,11 +306,15 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 		}
 		for _, w := range sessWins {
 			inView := isViewed(v, w.Session, w.Index, w.Active)
+			cmd := ""
+			if len(w.PaneCmds) > 0 {
+				cmd = w.PaneCmds[0]
+			}
 			row := railRow{
 				depth: 1, isWin: true, label: w.Index + ":" + w.Name,
 				sess: s.Name, window: w.Index, active: w.Active,
-				instanceID: s.SessionID,
-				bell:       w.Bell, done: w.Done, act: w.Activity, inView: inView,
+				instanceID: s.SessionID, cmd: cmd,
+				bell: w.Bell, done: w.Done, act: w.Activity, inView: inView,
 				activityAt: w.ActivityAt,
 			}
 			suppressViewedMarks(&row)

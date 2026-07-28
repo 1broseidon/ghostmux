@@ -3,6 +3,7 @@ package rail
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/1broseidon/ghostmux/internal/tmux"
 )
@@ -122,5 +123,25 @@ func TestActivityLedgerOutageKeepsLastGoodStateStaleSafe(t *testing.T) {
 	m.observeActivity(recovered)
 	if !recovered[0].Activity {
 		t.Fatal("recovery lost activity advanced across outage")
+	}
+}
+
+// TestAgentQuietAge: the age is evidence rendering — empty without a
+// timestamp, empty under a minute, coarse units above it.
+func TestAgentQuietAge(t *testing.T) {
+	now := time.Unix(1000000, 0)
+	for _, tc := range []struct {
+		at   int64
+		want string
+	}{
+		{0, ""},
+		{999970, ""}, // 30s: recent output is not news
+		{999000, "16m"}, // 1000s ago
+		{1000000 - 7200, "2h"},
+		{1000000 - 3*86400, "3d"},
+	} {
+		if got := agentQuietAge(now, tc.at); got != tc.want {
+			t.Errorf("agentQuietAge(%d) = %q, want %q", tc.at, got, tc.want)
+		}
 	}
 }

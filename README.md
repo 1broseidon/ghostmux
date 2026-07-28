@@ -71,7 +71,9 @@ The attention gutter uses `●` for bell, `✓` for a foreground command returni
 
 A grouped tmux session that stops becomes a ghost row. Starting it creates a new tmux session with the recorded name and working directory; ghostmux does not restore processes, windows, layout, or commands — the name and the directory are the entire promise, and the settings screen chooses whether the remembered directory is the launch directory or the last active pane's.
 
-The Return Queue is orderable because tmux proves `#{window_activity}` per window: `]` selects the unseen `●`/`✓` window with the oldest timestamp, points the viewport at it, and lets the existing clearing paths (native bell clear, `@ghostmux_done` clear-on-view) remove it from the queue. There is no queue state to corrupt — the queue is re-derived from evidence every tick, and a fold never hides a queue entry.
+The Return Queue is orderable because tmux proves `#{window_activity}` per window: `]` selects the unseen `●`/`✓` window with the oldest timestamp — agent windows first (detected ambiently from the foreground command), plain jobs after — points the viewport at it, and lets the existing clearing paths (native bell clear, `@ghostmux_done` clear-on-view) remove it from the queue. There is no queue state to corrupt — the queue is re-derived from evidence every tick, and a fold never hides a queue entry.
+
+Agent rows also state their quiet time (`claude 4m`) — how long since the window last produced output, from the same timestamp. It is deliberately a fact, not a verb: ghostmux will not claim an agent is "working" or "stuck" from evidence that cannot prove either. `ghostmux doctor` reports which agents are on `PATH` and whether Claude Code's bell hook is wired.
 
 ## Making agents ring the queue
 

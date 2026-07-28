@@ -156,12 +156,48 @@ func CmdDoctor() error {
 		check("tmux sessions", true, fmt.Sprintf("%d visible to the rail", n))
 	}
 
+	checkAgentBell(check)
 	checkRefreshLeases(check)
 
 	if !ok {
 		fmt.Println("\nghostmux runs with what is installed; everything listed is only\nwhat tmux can prove about its own state.")
 	}
 	return nil
+}
+
+// checkAgentBell reports whether detected agents are wired to ring the rail.
+// Detection and advice only — ghostmux never edits another tool's config
+// (README: "Making agents ring the queue" is the recipe). Only Claude Code's
+// settings are inspected, because its hook format is the one the recipe
+// documents; other agents ring by emitting BEL themselves.
+func checkAgentBell(check func(label string, pass bool, detail string)) {
+	var found []string
+	for _, agent := range []string{"claude", "codex", "aider", "gemini", "goose"} {
+		if _, err := exec.LookPath(agent); err == nil {
+			found = append(found, agent)
+		}
+	}
+	if len(found) == 0 {
+		return // nothing to advise: no agent on PATH is not a warning
+	}
+	check("agents", true, strings.Join(found, ", ")+" on PATH")
+
+	for _, agent := range found {
+		if agent != "claude" {
+			continue
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		settings, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+		wired := err == nil && strings.Contains(string(settings), `\a`)
+		if wired {
+			check("agent bell", true, "claude hooks emit BEL — ● reaches the rail")
+		} else {
+			check("agent bell", false, "claude found, no BEL hook in ~/.claude/settings.json — see README §Making agents ring the queue")
+		}
+	}
 }
 
 // checkRefreshLeases recognizes only the exact versioned command/channel

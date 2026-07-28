@@ -16,14 +16,14 @@ import (
 func returnQueueFixture(t *testing.T, vp *fakeViewport) {
 	t.Helper()
 	type winState struct {
-		id, index, activity string
-		bell, done          bool
+		id, index, activity, cmd string
+		bell, done               bool
 	}
 	wins := map[string]*winState{
-		"old":   {id: "$1", index: "1", activity: "100", bell: true},
-		"mid":   {id: "$2", index: "1", activity: "200", done: true},
-		"new":   {id: "$3", index: "1", activity: "300", bell: true},
-		"quiet": {id: "$4", index: "1", activity: "50"},
+		"old":   {id: "$1", index: "1", activity: "100", cmd: "zsh", bell: true},
+		"mid":   {id: "$2", index: "1", activity: "200", cmd: "zsh", done: true},
+		"new":   {id: "$3", index: "1", activity: "300", cmd: "claude", bell: true},
+		"quiet": {id: "$4", index: "1", activity: "50", cmd: "zsh"},
 	}
 	order := []string{"old", "mid", "new", "quiet"}
 	orig := tmux.Runner
@@ -70,7 +70,7 @@ func returnQueueFixture(t *testing.T, vp *fakeViewport) {
 		case "list-panes":
 			var b strings.Builder
 			for _, name := range order {
-				b.WriteString(name + "\t" + wins[name].index + "\tzsh\n")
+				b.WriteString(name + "\t" + wins[name].index + "\t" + wins[name].cmd + "\n")
 			}
 			return b.String(), nil
 		}
@@ -91,10 +91,11 @@ func returnQueueModel(t *testing.T) (*railModel, *fakeViewport) {
 	return m, vp
 }
 
-// TestReturnOldestDrainsByActivityTimestamp is the Return Queue loop: each ]
-// views the oldest unseen ●/✓ window, and viewing removes it from the queue,
-// so repeated presses walk oldest → newest with no queue state of their own.
-func TestReturnOldestDrainsByActivityTimestamp(t *testing.T) {
+// TestReturnOldestDrainsAgentsFirstThenByActivityTimestamp is the Return
+// Queue loop: agents outrank plain jobs (the "new" window runs claude, so it
+// drains first despite being newest), then oldest → newest within the plain
+// tier. Viewing removes each entry, so the queue keeps no state of its own.
+func TestReturnOldestDrainsAgentsFirstThenByActivityTimestamp(t *testing.T) {
 	m, vp := returnQueueModel(t)
 	m.refresh()
 
@@ -102,7 +103,7 @@ func TestReturnOldestDrainsByActivityTimestamp(t *testing.T) {
 		t.Fatalf("fixture attention = ●%d ✓%d, want ●2 ✓1", bells, done)
 	}
 
-	for i, want := range []string{"old", "mid", "new"} {
+	for i, want := range []string{"new", "old", "mid"} {
 		next, _ := m.Update(key("]"))
 		*m = next.(railModel)
 		if got := vp.points[len(vp.points)-1]; got != want+":1" {
@@ -165,18 +166,18 @@ func TestReturnOldestIgnoresNonQueueRows(t *testing.T) {
 // away — which is the whole reason the queue beats scanning the rail.
 func TestReturnOldestReachesIntoCollapsedGroups(t *testing.T) {
 	m, vp := returnQueueModel(t)
-	m.groups = []Group{{Name: "work", Members: []string{"tmux:old"}}}
+	m.groups = []Group{{Name: "work", Members: []string{"tmux:new"}}}
 	m.collapsed[groupKey("work")] = true
 	m.refresh()
 
 	for _, r := range m.visible() {
-		if r.sess == "old" && !r.isGroup {
-			t.Fatalf("fixture broken: old is visible despite the fold")
+		if r.sess == "new" && !r.isGroup {
+			t.Fatalf("fixture broken: new is visible despite the fold")
 		}
 	}
 	next, _ := m.Update(key("]"))
 	*m = next.(railModel)
-	if len(vp.points) == 0 || vp.points[0] != "old:1" {
+	if len(vp.points) == 0 || vp.points[0] != "new:1" {
 		t.Fatalf("folded member unreachable: points=%v err=%q", vp.points, m.errMsg)
 	}
 }

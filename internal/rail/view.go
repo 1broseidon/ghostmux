@@ -2,6 +2,7 @@ package rail
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -362,12 +363,19 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	// Flat rows show the window's foreground command dim after the name,
 	// truncated into whatever space the name and suffix leave over. No
 	// liveness animation: pane_current_command can't distinguish a working
-	// process from an idle one, and implying activity would mislead.
+	// process from an idle one, and implying activity would mislead. Agent
+	// rows instead state the evidence: how long since the window last
+	// produced output (#{window_activity}) — a fact, not a verb like
+	// "working" or "idle", which would be exactly that inference.
 	cmdStr := ""
 	if r.flat && r.cmd != "" {
 		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
 		if rest >= 5 { // " · " + at least 2 chars of command
-			cmdStr = truncateLabel(r.cmd, rest-3)
+			label := r.cmd
+			if age := agentQuietAge(time.Now(), r.activityAt); age != "" && isAgentCmd(r.cmd) {
+				label += " " + age
+			}
+			cmdStr = truncateLabel(label, rest-3)
 		}
 	}
 

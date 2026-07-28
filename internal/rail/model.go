@@ -775,12 +775,22 @@ func (m *railModel) viewPrevious() {
 func (m *railModel) returnOldest() {
 	// m.rows, not visible(): a fold hides rows from the eye, not from the
 	// queue — attention inside a collapsed group must still be reachable.
+	// Agents outrank plain jobs: a finished agent is usually the next thing
+	// to steer, a finished build is usually just news. Oldest-first within
+	// each tier. Agent-ness is the same ambient foreground-command evidence
+	// that drives the accent — never a naming convention.
+	better := func(a, b railRow) bool {
+		if aa, ba := isAgentCmd(a.cmd), isAgentCmd(b.cmd); aa != ba {
+			return aa
+		}
+		return a.activityAt < b.activityAt
+	}
 	best := -1
 	for i, r := range m.rows {
 		if !attentionLeaf(r) || (!r.bell && !r.done) {
 			continue
 		}
-		if best < 0 || r.activityAt < m.rows[best].activityAt {
+		if best < 0 || better(r, m.rows[best]) {
 			best = i
 		}
 	}
