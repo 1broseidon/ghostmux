@@ -76,12 +76,44 @@ func (s Settings) Empty() bool {
 
 // Document is the complete state file. Version is set to CurrentVersion in
 // memory even when an unversioned legacy document was loaded.
+//
+// Extra carries top-level keys this build does not know — typically written
+// by a newer (or reverted-away) build. They are never interpreted and never
+// discarded: a save writes them back exactly, so switching binaries cannot
+// destroy another version's state. Unknown fields NESTED inside known keys
+// are tolerated on load but not preserved; only malformed JSON or a known
+// key with the wrong shape is corrupt.
 type Document struct {
 	Version   int               `json:"version"`
 	Groups    []Group           `json:"groups"`
 	Collapsed []string          `json:"collapsed,omitempty"`
 	Dirs      map[string]string `json:"dirs,omitempty"`
 	Settings  *Settings         `json:"settings,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// MarshalJSON writes the known fields and then the preserved unknown keys,
+// so a document loaded from a newer build's file round-trips losslessly.
+func (d Document) MarshalJSON() ([]byte, error) {
+	type known Document // no methods: avoids recursion
+	base, err := json.Marshal(known(d))
+	if err != nil {
+		return nil, err
+	}
+	if len(d.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for key, raw := range d.Extra {
+		if _, taken := merged[key]; !taken {
+			merged[key] = raw
+		}
+	}
+	return json.Marshal(merged)
 }
 
 // Info describes the exact primary snapshot held by a Store and the backup
@@ -422,12 +454,18 @@ func decodeDocument(b []byte) (Document, bool, error) {
 		return Document{}, false, fmt.Errorf("trailing JSON data: %w", err)
 	}
 
-	allowed := map[string]bool{
+	known := map[string]bool{
 		"version": true, "groups": true, "collapsed": true, "dirs": true, "settings": true,
 	}
-	for key := range fields {
-		if !allowed[key] {
-			return Document{}, false, fmt.Errorf("unknown field %q", key)
+	var preserved map[string]json.RawMessage
+	for key, raw := range fields {
+		if !known[key] {
+			// A key this build does not know is another build's state, not
+			// corruption. Preserve it verbatim so a save cannot destroy it.
+			if preserved == nil {
+				preserved = map[string]json.RawMessage{}
+			}
+			preserved[key] = raw
 		}
 	}
 
@@ -446,7 +484,7 @@ func decodeDocument(b []byte) (Document, bool, error) {
 		}
 	}
 
-	doc := Document{Version: CurrentVersion}
+	doc := Document{Version: CurrentVersion, Extra: preserved}
 	if raw, ok := fields["groups"]; ok && !isJSONNull(raw) {
 		if err := decodeStrict(raw, &doc.Groups); err != nil {
 			return Document{}, false, fmt.Errorf("groups: %w", err)
@@ -472,9 +510,11 @@ func decodeDocument(b []byte) (Document, bool, error) {
 	return doc, legacy, nil
 }
 
+// decodeStrict enforces shape, not vocabulary: a known key must decode into
+// its expected type, but unknown NESTED fields (a newer build's addition to
+// settings or groups) are tolerated rather than treated as corruption.
 func decodeStrict(raw []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
 		return err
 	}

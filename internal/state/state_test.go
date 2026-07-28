@@ -137,9 +137,6 @@ func TestStrictLoadRefusesInvalidDocumentsWithoutMutation(t *testing.T) {
 		{"wrong collapsed type", `{"groups":[],"collapsed":"x"}`, StatusCorrupt},
 		{"wrong dirs type", `{"groups":[],"dirs":[]}`, StatusCorrupt},
 		{"wrong settings type", `{"groups":[],"settings":[]}`, StatusCorrupt},
-		{"unknown top field", `{"groups":[],"other":1}`, StatusCorrupt},
-		{"unknown group field", `{"groups":[{"name":"x","members":[],"other":1}]}`, StatusCorrupt},
-		{"unknown settings field", `{"groups":[],"settings":{"other":1}}`, StatusCorrupt},
 		{"future version", `{"version":2,"groups":[]}`, StatusUnsupported},
 		{"zero version", `{"version":0,"groups":[]}`, StatusUnsupported},
 		{"null version", `{"version":null,"groups":[]}`, StatusUnsupported},
@@ -571,5 +568,55 @@ func TestReloadAdoptsOnlyValidPrimaryAndCanClearBlockAfterRepair(t *testing.T) {
 	}
 	if store.LoadError() != nil || store.Snapshot().Groups[0].Name != "repaired" {
 		t.Fatalf("repair was not adopted: err=%v doc=%+v", store.LoadError(), store.Snapshot())
+	}
+}
+
+// TestUnknownKeysAreToleratedAndPreserved: a key this build does not know is
+// another build's state, not corruption. Top-level unknowns survive a save
+// verbatim; unknown fields nested inside known keys load without error.
+func TestUnknownKeysAreToleratedAndPreserved(t *testing.T) {
+	path := statePath(t)
+	writePrimary(t, path, []byte(
+		`{"version":1,"groups":[{"name":"work","members":["tmux:api"],"future":1}],`+
+			`"settings":{"rail_width":28,"novel_setting":"x"},`+
+			`"reach":[{"name":"router","host":"root@10.0.0.1","session":"router"}]}`))
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("tolerant open failed: %v", err)
+	}
+	if info := store.Info(); info.Status != StatusValid {
+		t.Fatalf("status = %s, want valid", info.Status)
+	}
+	doc := store.Snapshot()
+	if len(doc.Groups) != 1 || doc.Groups[0].Name != "work" {
+		t.Fatalf("known fields lost around unknowns: %+v", doc.Groups)
+	}
+	if doc.Settings == nil || doc.Settings.RailWidth != 28 {
+		t.Fatalf("known settings lost around unknowns: %+v", doc.Settings)
+	}
+	if len(doc.Extra) != 1 || doc.Extra["reach"] == nil {
+		t.Fatalf("unknown top-level key not preserved: %+v", doc.Extra)
+	}
+
+	// A save must write the unknown key back exactly.
+	if err := store.Update(func(d *Document) error {
+		d.Collapsed = []string{"grp:work"}
+		return nil
+	}); err != nil {
+		t.Fatalf("save with preserved keys: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"root@10.0.0.1"`) {
+		t.Fatalf("save destroyed the preserved key: %s", b)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen after preserving save: %v", err)
+	}
+	if got := reopened.Snapshot(); len(got.Extra) != 1 || len(got.Collapsed) != 1 {
+		t.Fatalf("round trip lost data: extra=%+v collapsed=%+v", got.Extra, got.Collapsed)
 	}
 }
