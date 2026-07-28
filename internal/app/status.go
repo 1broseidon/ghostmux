@@ -20,9 +20,13 @@ import (
 // full-bleed statusline of whatever runs in the viewport. The one piece of
 // "where am I" that survives is the hostname, and only because attach-anywhere
 // means you genuinely may not know which box you are on.
+//
+// The bar paints NO background. Attach-anywhere means the viewer's terminal
+// theme is unknown; a hardcoded ground only "engraves" on the one theme that
+// happens to match it and renders as a solid strip on every other. The
+// terminal's own ground is the panel ground.
 const (
-	hexBarGround = "#1d2021" // panel ground — engraved, not a strip
-	hexBarFg     = "#928374"
+	hexBarFg = "#928374"
 	hexBarKey    = "#fabd2f" // keys pop; their labels do not
 	hexBarHost   = "#665c54"
 	hexBarLeader = "#3c3836" // dotted rule + leader: texture, not a border
@@ -38,14 +42,14 @@ const (
 )
 
 var (
-	styBar        = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarFg))
-	styBarKey     = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarKey))
-	styBarHost    = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarHost))
-	styBarLeader  = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarLeader))
-	styWordmark   = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexMarkRail)).Bold(true)
-	styWordmarkVp = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexMarkVp)).Bold(true)
-	styBarBell    = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarBell)).Bold(true)
-	styBarDone    = lipgloss.NewStyle().Background(lipgloss.Color(hexBarGround)).Foreground(lipgloss.Color(hexBarDone))
+	styBar        = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarFg))
+	styBarKey     = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarKey))
+	styBarHost    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarHost))
+	styBarLeader  = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarLeader))
+	styWordmark   = lipgloss.NewStyle().Foreground(lipgloss.Color(hexMarkRail)).Bold(true)
+	styWordmarkVp = lipgloss.NewStyle().Foreground(lipgloss.Color(hexMarkVp)).Bold(true)
+	styBarBell    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarBell)).Bold(true)
+	styBarDone    = lipgloss.NewStyle().Foreground(lipgloss.Color(hexBarDone))
 	hostnameStr   = func() string {
 		h, err := os.Hostname()
 		if err != nil || h == "" {
