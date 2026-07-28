@@ -705,15 +705,22 @@ func stateStatusText(status string, version int) string {
 	}
 }
 
+// releaseVersion is stamped by GoReleaser via ldflags on tagged builds; empty
+// for source builds, which fall through to module/vcs build information.
+var releaseVersion string
+
 // buildVersion reports linker build information. An unstamped build is dev.
 func buildVersion() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
+		if releaseVersion != "" {
+			return releaseVersion
+		}
 		return "dev build"
 	}
 	version := info.Main.Version
 	if version == "" || version == "(devel)" {
-		version = ""
+		version = releaseVersion
 	}
 	rev := ""
 	for _, s := range info.Settings {

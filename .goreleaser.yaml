@@ -1,0 +1,64 @@
+version: 2
+
+project_name: ghostmux
+
+builds:
+  - id: ghostmux
+    main: ./cmd/ghostmux
+    binary: ghostmux
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/1broseidon/ghostmux/internal/app.releaseVersion=v{{ .Version }}
+
+archives:
+  - id: ghostmux
+    ids:
+      - ghostmux
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+brews:
+  - ids:
+      - ghostmux
+    repository:
+      owner: 1broseidon
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "formula: update ghostmux to {{ .Tag }}"
+    homepage: https://github.com/1broseidon/ghostmux
+    description: The tmux fleet navigator
+    license: MIT
+    dependencies:
+      - name: tmux
+    install: |
+      bin.install "ghostmux"

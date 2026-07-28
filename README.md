@@ -18,7 +18,13 @@ tmux keeps everything that makes it worth using: persistence, session truth, its
 
 ## Install
 
-From a source checkout:
+Homebrew (macOS or Linux):
+
+```bash
+brew install 1broseidon/tap/ghostmux
+```
+
+Or from a source checkout:
 
 ```bash
 go install ./cmd/ghostmux
