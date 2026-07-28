@@ -4,6 +4,23 @@ All notable changes to ghostmux are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-07-28
+
+Portability fixes from driving the panel over ssh from macOS: the frame
+may not assume the viewer's terminal theme or font.
+
+### Fixed
+- The footer bar no longer paints a hardcoded background. It inherited
+  gruvbox dark-hard's ground, which was invisible on matching themes and
+  rendered as a solid strip on every other terminal.
+- The footer's separator rule is a solid hairline instead of `┈` — dashed
+  box-drawing glyphs have a different gap rhythm in every font, and on
+  some emulators the texture read as damage rather than design.
+
+### Changed
+- CI: release workflow actions bumped to Node 24 majors; GoReleaser
+  pinned to `~> v2`.
+
 ## [0.3.0] - 2026-07-28
 
 The first public release. ghostmux is the tmux fleet navigator: an
