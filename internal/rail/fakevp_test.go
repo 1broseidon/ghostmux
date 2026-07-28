@@ -28,14 +28,6 @@ func (v *fakeViewport) Point(sess, win string, grouped bool) {
 		tmux.SetDone(sess, win, false)
 	}
 }
-func (v *fakeViewport) PointRemote(name, host, session string) {
-	v.points = append(v.points, "remote:"+name+"@"+host+":"+session)
-	if v.pointBlocked {
-		return
-	}
-	v.lock = ViewState{Sess: name}
-	v.detached = false
-}
 func (v *fakeViewport) Idle()               { v.lock = ViewState{} }
 func (v *fakeViewport) Detach()             { v.Idle(); v.detached = true }
 func (v *fakeViewport) Heal() (bool, error) { return false, v.healErr }

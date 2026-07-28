@@ -15,7 +15,7 @@ func organizationTargetOf(r railRow) (organizationTarget, bool) {
 		}
 		return organizationTarget{group: true, id: r.label}, true
 	}
-	if r.sess == "" || r.reach {
+	if r.sess == "" {
 		return organizationTarget{}, false
 	}
 	return organizationTarget{id: memberKey(r.sess)}, true

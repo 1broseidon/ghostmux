@@ -419,60 +419,6 @@ if grep -q '"tmux:ghosty"' "$GJSON" 2>/dev/null; then
 else pass "ghost: declaration pruned from the state file"; fi
 send "q"; sleep 0.5
 
-# --- reach rows (PROTOTYPE): declared remote workspaces summoned over ssh ---
-# A PATH shim stands in for ssh. The panel's whole contract here is "run
-# `ssh -t <host> -- tmux new-session -A -s <session>` as the viewport child";
-# the shim proves that exact argv end-to-end by execing the same tmux command
-# against the scratch server instead of a network.
-SHIM=$(mktemp -d)
-cat > "$SHIM/ssh" <<'SHIMEOF'
-#!/usr/bin/env bash
-# fake ssh: expect -t <host> -- tmux <args...>; run tmux on the scratch server
-shift 2
-[ "$1" = "--" ] && shift
-[ "$1" = "tmux" ] && shift
-exec env -u TMUX -u TMUX_PANE tmux -L gm-solo -f /dev/null "$@"
-SHIMEOF
-chmod +x "$SHIM/ssh"
-
-RSTATE=$(mktemp -d)
-XDG_STATE_HOME="$RSTATE" "$BIN" reach add faraway fakehost gm-reach-demo \
-  || fail "reach: add command failed"
-if XDG_STATE_HOME="$RSTATE" "$BIN" reach ls | grep -q "faraway	fakehost	gm-reach-demo"; then
-  pass "reach: declared target listed by the CLI"
-else fail "reach: ls does not list the declaration"; fi
-
-tmux $TA kill-session -t zdriver 2>/dev/null
-tmux $TA new-session -d -s zdriver -x 120 -y 32
-tmux $TA send-keys -t zdriver "PATH='$SHIM':\$PATH XDG_STATE_HOME='$RSTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
-sleep 2.5
-if cap | grep -qE "faraway.*↗|↗.*faraway"; then pass "reach: declared row renders with the ↗ mark"
-else fail "reach: row missing from the rail"; cap | head -10; fi
-if cap | grep -q "fakehost"; then pass "reach: host shown in the dim command slot"
-else fail "reach: host not shown"; cap | head -10; fi
-
-send "/"
-tmux $TA send-keys -t zdriver "faraway"; sleep 0.5
-send "" Enter
-send "j"
-send "" Enter
-sleep 2
-if tmux $TA has-session -t =gm-reach-demo 2>/dev/null; then
-  pass "reach: ↵ summoned the remote session through ssh"
-else fail "reach: no session created by the summon"; cap | head -14; fi
-# status-left-length 10 truncates the inner bar to "[gm-reach-" — the exact
-# illusion the README documents; assert on the truncated truth.
-if cap | grep -q "\[gm-reach-"; then pass "reach: viewport attached to the summoned session"
-else fail "reach: viewport not showing the remote session"; cap | head -14; fi
-
-send "d"
-if tmux $TA has-session -t =gm-reach-demo 2>/dev/null; then
-  pass "reach: detach left the remote session running"
-else fail "reach: detach killed the remote session"; fi
-send "q"; sleep 0.5
-tmux $TA kill-session -t =gm-reach-demo 2>/dev/null
-
-
 echo
 [ $FAIL -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit $FAIL

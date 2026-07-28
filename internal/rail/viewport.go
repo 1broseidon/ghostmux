@@ -19,10 +19,6 @@ type Viewport interface {
 	// Point renders a tmux session (and window, if given); grouped attaches
 	// through a uniquely owned transient session group.
 	Point(sess, win string, grouped bool)
-	// PointRemote runs ssh to a declared remote workspace (PROTOTYPE):
-	// `ssh -t host -- tmux new-session -A -s session`. The lock records the
-	// reach name; the panel proves nothing about the remote side.
-	PointRemote(name, host, session string)
 	// Idle renders the idle placeholder and drops the lock.
 	Idle()
 	// Detach is the `d` key: idle, and stay idle across heals.

@@ -24,8 +24,6 @@ func main() {
 		err = wiring.CmdDoctor()
 	case "rail":
 		err = rail.CmdRail(os.Args[2:])
-	case "reach":
-		err = wiring.CmdReach(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -53,7 +51,6 @@ usage:
   ghostmux ls          list tmux sessions
   ghostmux up <name>   create or attach a named tmux session
   ghostmux rail once   print one rail frame and exit (debugging)
-  ghostmux reach ...   declare remote (ssh) workspaces for the rail (prototype)
 
 The panel lists tmux sessions in a rail beside an embedded terminal. tmux
 owns session persistence. ghostmux persists groups, fold state, observed

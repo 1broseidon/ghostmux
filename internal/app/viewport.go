@@ -28,7 +28,6 @@ type ptyViewport struct {
 	lockWin  string // window index within lockSess
 	detached bool   // user pressed d — heal stays idle until the next Point
 	grouped  bool   // attached through view
-	remote   bool   // PointRemote child (ssh); no local probe can heal it
 
 	view               tmux.ViewRef // current owned grouped shadow, zero if direct/idle
 	pendingRetirements []pendingViewRetirement
@@ -107,26 +106,9 @@ func (v *ptyViewport) Point(sess, win string, grouped bool) {
 
 	v.view = ref
 	v.lockSess, v.lockWin, v.detached, v.grouped = sess, win, false, grouped
-	v.remote = false
 	if win != "" {
 		tmux.SetDone(sess, win, false)
 	}
-}
-
-// PointRemote implements rail.Viewport (PROTOTYPE): run ssh to a declared
-// remote workspace as the viewport child. The lock records the reach name so
-// the rail and bar can say what is showing; no local probe can validate it.
-func (v *ptyViewport) PointRemote(name, host, session string) {
-	if name == "" || host == "" || session == "" {
-		return
-	}
-	v.stopCurrent()
-	argv := []string{"ssh", "-t", host, "--", "tmux", "new-session", "-A", "-s", session}
-	if err := v.startChild(argv, nil); err != nil {
-		return
-	}
-	v.lockSess, v.lockWin = name, ""
-	v.detached, v.grouped, v.remote = false, false, true
 }
 
 // stopCurrent stops the PTY child first, retries older retirements, then
@@ -240,7 +222,7 @@ func joinViewportErrors(errs ...error) error {
 func (v *ptyViewport) Idle() {
 	v.stopCurrent()
 	v.lockSess, v.lockWin = "", ""
-	v.grouped, v.remote = false, false
+	v.grouped = false
 }
 
 // Detach implements rail.Viewport.
@@ -267,17 +249,6 @@ func (v *ptyViewport) Heal() (bool, error) {
 	_ = v.retryPendingRetirements()
 	if v.detached || v.lockSess == "" {
 		return false, v.pendingRetirementError() // idle on purpose: not a death to report
-	}
-	if v.remote {
-		// A remote child cannot be validated by a local probe, and blindly
-		// re-running ssh could loop on a dead link or an auth prompt. A
-		// finished ssh — detach or drop — idles; ↵ reconnects deliberately.
-		if v.childRunning() {
-			return false, v.pendingRetirementError()
-		}
-		v.lockSess, v.lockWin = "", ""
-		v.remote = false
-		return true, v.pendingRetirementError()
 	}
 
 	// A grouped shadow can keep shared windows alive after the original dies,
@@ -324,7 +295,7 @@ func (v *ptyViewport) takeFocusRequest() bool {
 // SyncActiveWindow implements rail.Viewport: follow ctrl+b navigation the user
 // performs inside the embedded client, exactly as classic does.
 func (v *ptyViewport) SyncActiveWindow(windows []tmux.Window) {
-	if v.lockSess == "" || v.remote {
+	if v.lockSess == "" {
 		return
 	}
 	target := v.AttachTarget()
@@ -354,7 +325,7 @@ func (v *ptyViewport) OnKill(sess string) {
 func (v *ptyViewport) Close() error {
 	_ = v.stopCurrent()
 	v.lockSess, v.lockWin = "", ""
-	v.grouped, v.remote = false, false
+	v.grouped = false
 	v.detached = true
 	v.w.Close()
 	return v.pendingRetirementError()

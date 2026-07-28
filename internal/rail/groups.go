@@ -35,7 +35,7 @@ func sessOf(key string) string {
 	return sess
 }
 
-func railState(doc state.Document) ([]Group, map[string]bool, map[string]string, []state.ReachTarget) {
+func railState(doc state.Document) ([]Group, map[string]bool, map[string]string) {
 	groups := make([]Group, len(doc.Groups))
 	for i, group := range doc.Groups {
 		groups[i] = group
@@ -49,7 +49,7 @@ func railState(doc state.Document) ([]Group, map[string]bool, map[string]string,
 	for key, dir := range doc.Dirs {
 		dirs[key] = dir
 	}
-	return groups, collapsed, dirs, append([]state.ReachTarget(nil), doc.Reach...)
+	return groups, collapsed, dirs
 }
 
 func setRailDocument(doc *state.Document, groups []Group, collapsed map[string]bool, dirs map[string]string) {
@@ -500,7 +500,7 @@ func (m *railModel) persistRail(groups []Group, collapsed map[string]bool, dirs 
 		}
 		return err
 	}
-	m.groups, m.collapsed, m.dirs, m.reach = railState(store.Snapshot())
+	m.groups, m.collapsed, m.dirs = railState(store.Snapshot())
 	return nil
 }
 
@@ -508,7 +508,7 @@ func (m *railModel) adoptStoreSnapshot() {
 	if m.ensureStore() == nil {
 		return
 	}
-	m.groups, m.collapsed, m.dirs, m.reach = railState(m.store.Snapshot())
+	m.groups, m.collapsed, m.dirs = railState(m.store.Snapshot())
 	if m.store.LoadError() != nil {
 		m.storageErr = "state read-only: " + m.store.Info().Status
 	}

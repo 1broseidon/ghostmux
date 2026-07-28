@@ -136,7 +136,7 @@ func nonWindowMoveIndex(rows []railRow, cursor, dir int, query string) int {
 // window or flat session. Activity (~) stays gutter-only. Aggregates are not
 // counted — the bar reports leaves, and j/k finds the mark.
 func attentionLeaf(r railRow) bool {
-	if r.isGroup || r.ghost || r.reach || r.validity != rowFresh {
+	if r.isGroup || r.ghost || r.validity != rowFresh {
 		return false
 	}
 	return r.isWin || r.flat
