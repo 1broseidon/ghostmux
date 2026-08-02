@@ -1,6 +1,7 @@
 package rail
 
 import (
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"strings"
 	"time"
 
@@ -9,18 +10,18 @@ import (
 
 // Gruvbox Dark Hard hex table, per SPEC.md §4 — the ONLY colors allowed in
 // the rail. Hex, not ANSI numbers: ghostty renders truecolor.
-const (
-	hexTitleAccent  = "#fe8019" // selected ▎ / in-view ▸
-	hexTitleName    = "#8ec07c" // "ghostmux" / in-view session name
-	hexTitleTail    = "#928374" // hints / dim / collapse arrows
-	hexSessionName  = "#ebdbb2" // session name, not in view
-	hexAttached     = "#b8bb26" // attached ● / active window / done ✓
-	hexBell         = "#fb4934" // bell ● / errors / kill confirm y
-	hexActivity     = "#fabd2f" // activity ~ / filter prompt /
-	hexCursorBg     = "#504945" // cursor bar background / dimmed fg
-	hexInactiveWin  = "#928374"
-	hexFilterCursor = "#ebdbb2"
-	hexAgent        = "#d3869b" // detected agent command (design palette "agent accent")
+var (
+	hexTitleAccent  = theme.C("#fe8019", "9")  // selected ▎ / in-view ▸
+	hexTitleName    = theme.C("#8ec07c", "14") // "ghostmux" / in-view session name
+	hexTitleTail    = theme.C("#928374", "8")  // hints / dim / collapse arrows
+	hexSessionName  = theme.C("#ebdbb2", "7")  // session name, not in view
+	hexAttached     = theme.C("#b8bb26", "10") // attached ● / active window / done ✓
+	hexBell         = theme.C("#fb4934", "1")  // bell ● / errors / kill confirm y
+	hexActivity     = theme.C("#fabd2f", "3")  // activity ~ / filter prompt /
+	hexCursorBg     = theme.C("#504945", "8")  // cursor bar background / dimmed fg
+	hexInactiveWin  = theme.C("#928374", "8")
+	hexFilterCursor = theme.C("#ebdbb2", "7")
+	hexAgent        = theme.C("#d3869b", "13") // detected agent command (design palette "agent accent")
 )
 
 var (
@@ -369,13 +370,19 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	// rows instead state the evidence: how long since the window last
 	// produced output (#{window_activity}) — a fact, not a verb like
 	// "working" or "idle", which would be exactly that inference.
-	cmdStr, ageStr := "", ""
+	cmdStr, ageStr, sparkStr := "", "", ""
 	if r.flat && r.cmd != "" {
 		rest := labelWidth - len([]rune(name)) - len([]rune(suffix))
 		if rest >= 5 { // " · " + at least 2 chars of command
 			cmdStr = truncateLabel(r.cmd, rest-3)
-			if age := agentQuietAge(time.Now(), r.activityAt); age != "" && isAgentCmd(r.cmd) {
-				if left := rest - 3 - len([]rune(cmdStr)) - 1; left >= len([]rune(age)) {
+			left := rest - 3 - len([]rune(cmdStr)) - 1
+			// The pulse rule: motion while alive, age while quiet, never both.
+			// A sparkline is observed cadence; when every bucket is silent the
+			// quiet age states the same evidence in fewer pixels.
+			if isAgentCmd(r.cmd) {
+				if spark := sparkline(r.pulse); spark != "" && left >= len([]rune(spark)) {
+					sparkStr = spark
+				} else if age := agentQuietAge(time.Now(), r.activityAt); age != "" && left >= len([]rune(age)) {
 					ageStr = age
 				}
 			}
@@ -403,12 +410,25 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 		if ageStr != "" {
 			cmdRaw += " " + ageStr
 		}
+		if sparkStr != "" {
+			cmdRaw += " " + sparkStr
+		}
 	}
 	dirRaw := ""
 	if dirStr != "" {
 		dirRaw = " " + dirStr
 	}
-	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw)) + len([]rune(dirRaw))
+	// Banked unseen lines render flush against the marks: the count is the
+	// queue's "what's waiting", so it sits beside the glyph that says "why".
+	unreadRaw := ""
+	if r.unread > 0 && !r.ghost && r.validity == rowFresh {
+		n := r.unread
+		if n > 999 {
+			n = 999
+		}
+		unreadRaw = "+" + itoa(n)
+	}
+	used := len([]rune(name)) + len([]rune(suffix)) + len([]rune(cmdRaw)) + len([]rune(dirRaw)) + len([]rune(unreadRaw))
 	pad := strings.Repeat(" ", max0(labelWidth-used))
 
 	dimFg := func(fg string) string {
@@ -455,12 +475,20 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 			cmdStyled += rowStyle(dimFg(hexCursorBg), false, cursor).Render(" ") +
 				rowStyle(dimFg(hexTitleTail), false, cursor).Render(ageStr)
 		}
+		if sparkStr != "" {
+			cmdStyled += rowStyle(dimFg(hexCursorBg), false, cursor).Render(" ") +
+				rowStyle(dimFg(hexAgent), false, cursor).Render(sparkStr)
+		}
 	}
 	dirStyled := ""
 	if dirStr != "" {
 		dirStyled = rowStyle(dimHex, false, cursor).Render(dirRaw)
 	}
 	padStyled := rowStyle(hexSessionName, false, cursor).Render(pad)
+	unreadStyled := ""
+	if unreadRaw != "" {
+		unreadStyled = rowStyle(dimFg(hexActivity), false, cursor).Render(unreadRaw)
+	}
 
 	marks := padMarksLeft(r.gutter(), railMarksWidth)
 	dimMark := ""
@@ -469,7 +497,7 @@ func renderRow(r railRow, cursor bool, blinkPhase int, filterQuery string) strin
 	}
 	marksStyled := renderMarks(marks, dimMark, blinkPhase, cursor)
 
-	return edgeStyled + indentStyled + disclosureStyled + nameStyled + suffixStyled + cmdStyled + dirStyled + padStyled + marksStyled
+	return edgeStyled + indentStyled + disclosureStyled + nameStyled + suffixStyled + cmdStyled + dirStyled + padStyled + unreadStyled + marksStyled
 }
 
 // ghostDimHex is the dim a ghost renders in: the filter's #504945 — except on

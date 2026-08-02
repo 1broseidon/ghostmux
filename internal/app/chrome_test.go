@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -915,5 +916,38 @@ func TestStateStatusTextDistinguishesStorageConditions(t *testing.T) {
 		if got := stateStatusText(test.status, 1); got != test.want {
 			t.Errorf("stateStatusText(%q) = %q, want %q", test.status, got, test.want)
 		}
+	}
+}
+
+// TestPeekPagerScrollsAndCloses: the [ pager holds j/k for scrolling —
+// the one overlay that must — and any other key closes it.
+func TestPeekPagerScrollsAndCloses(t *testing.T) {
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%02d", i)
+	}
+	m := soloModel{w: 100, h: 20, peek: &peekOverlay{title: "api · +40 unseen", lines: lines}}
+
+	view := peekOverlayView("base\n"+strings.Repeat(strings.Repeat(" ", 100)+"\n", 18)+"base", m.peek, m.w, m.h)
+	plain := ansi.Strip(view)
+	if !strings.Contains(plain, "api · +40 unseen") || !strings.Contains(plain, "line-00") {
+		t.Fatalf("pager did not render: %q", plain)
+	}
+	if !strings.Contains(plain, "j/k scroll") {
+		t.Fatalf("pager footer missing: %q", plain)
+	}
+
+	m = m.updatePeekKey(key("j"))
+	if m.peek == nil || m.peek.offset != 1 {
+		t.Fatalf("j did not scroll: %+v", m.peek)
+	}
+	m = m.updatePeekKey(key("G"))
+	view = peekOverlayView("base\n"+strings.Repeat(strings.Repeat(" ", 100)+"\n", 18)+"base", m.peek, m.w, m.h)
+	if !strings.Contains(ansi.Strip(view), "line-39") {
+		t.Fatalf("G did not reach the bottom: %q", ansi.Strip(view))
+	}
+	m = m.updatePeekKey(key("x"))
+	if m.peek != nil {
+		t.Fatal("non-scroll key did not close the pager")
 	}
 }

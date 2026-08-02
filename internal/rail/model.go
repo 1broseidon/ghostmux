@@ -98,15 +98,17 @@ type railModel struct {
 	rows         []railRow
 	cursor       int // index into visible() rows, not raw rows
 	height       int
-	hub          string          // session the rail lives in — excluded from the tree
-	vp           Viewport        // where selections render (pane / embedded pty)
-	viewportDead bool            // pane was dead this tick — swap the hint line
-	viewportErr  string          // persistent typed-probe failure from Heal
-	done         *doneTracker    // per-pane command-transition tracking (D5)
-	activity     activityLedger  // stable window ID → panel-local unread state
-	attached     map[string]bool // session name → attached elsewhere
-	blinking     bool            // 400ms blink timer running (D7)
-	blinkPhase   int             // bell blink phase, mod 3 (glyph hidden on phase 2)
+	hub          string                // session the rail lives in — excluded from the tree
+	vp           Viewport              // where selections render (pane / embedded pty)
+	viewportDead bool                  // pane was dead this tick — swap the hint line
+	viewportErr  string                // persistent typed-probe failure from Heal
+	done         *doneTracker          // per-pane command-transition tracking (D5)
+	activity     activityLedger        // stable window ID → panel-local unread state
+	pulse        map[string]*pulseRing // stable window ID → output cadence ring
+	unread       map[string]unreadInfo // stable window ID → banked unseen lines
+	attached     map[string]bool       // session name → attached elsewhere
+	blinking     bool                  // 400ms blink timer running (D7)
+	blinkPhase   int                   // bell blink phase, mod 3 (glyph hidden on phase 2)
 
 	collapsed map[string]bool // session name → collapsed in the rail (Task 7)
 
@@ -806,6 +808,43 @@ func (m *railModel) returnOldest() {
 	}
 	m.refresh() // re-observes marks post-view and follows the viewport
 	m.flashInfo("return · " + viewTargetName(target))
+}
+
+// unreadPeekCap bounds one peek fetch. The COUNT is always exact (ledger
+// arithmetic); only the text is capped — a 5,000-line dump is not a peek.
+const unreadPeekCap = 200
+
+// UnreadPeek returns the unseen tail of the selected row's window: the count
+// from the ledger, the text captured lazily — only when the operator asks.
+// ok is false when the selected row has nothing banked.
+func (m Model) UnreadPeek() (title string, lines []string, ok bool) {
+	vis := m.visible()
+	if m.cursor < 0 || m.cursor >= len(vis) {
+		return "", nil, false
+	}
+	r := vis[m.cursor]
+	info, has := m.unread[r.windowID]
+	if r.windowID == "" || !has || info.count == 0 || info.pane == "" {
+		return "", nil, false
+	}
+	fetch := info.count
+	if fetch > unreadPeekCap {
+		fetch = unreadPeekCap
+	}
+	captured, err := tmux.CaptureTail(info.pane, fetch)
+	if err != nil {
+		return "", nil, false
+	}
+	title = viewTargetName(r) + " · +" + itoa(info.count) + " unseen"
+	if info.alt {
+		// A full-screen program's history says less; the title says so
+		// instead of letting the peek overclaim.
+		title += " · TUI"
+	}
+	if info.count > unreadPeekCap {
+		title += " (last " + itoa(unreadPeekCap) + ")"
+	}
+	return title, captured, true
 }
 
 // flashError records an action error for the hint-line flash (3s, Task 9).

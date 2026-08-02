@@ -244,3 +244,114 @@ func TestDepartureRedrawDoesNotMarkActivity(t *testing.T) {
 		t.Fatalf("post-settle output was not marked: %+v ledger=%+v", later[0], m.activity)
 	}
 }
+
+func bankWindow(at int64, lines int, bell bool) []tmux.Window {
+	w := activityWindow("bank", "@8", "1", at)
+	w.Bell = bell
+	w.Panes = []tmux.PaneStat{{ID: "%5", Lines: lines, Active: true}}
+	return []tmux.Window{w}
+}
+
+// TestUnreadBanksLinesGatedOnActivity is the Unread ledger contract: growth
+// counts only when the window provably emitted output (activity advanced),
+// reflow growth is absorbed, shrink rebaselines, viewing drains, and the
+// departure settle absorbs the panel's own redraw.
+func TestUnreadBanksLinesGatedOnActivity(t *testing.T) {
+	clock := time.Unix(50000, 0)
+	origNow := activityNow
+	activityNow = func() time.Time { return clock }
+	t.Cleanup(func() { activityNow = origNow })
+
+	vp := &fakeViewport{}
+	m := railModel{vp: vp}
+
+	// First sight baselines: no unread invented from history that predates us.
+	first := bankWindow(10, 100, false)
+	m.observeActivity(first)
+	if first[0].Unread != 0 {
+		t.Fatalf("first sight banked lines: %+v", first[0])
+	}
+
+	// Output while unseen: 30 new lines backed by an activity advance.
+	grew := bankWindow(11, 130, false)
+	m.observeActivity(grew)
+	if grew[0].Unread != 30 {
+		t.Fatalf("unseen output not banked: unread=%d want 30", grew[0].Unread)
+	}
+
+	// Reflow: totals moved with NO activity advance — absorbed, not banked.
+	reflow := bankWindow(11, 145, false)
+	m.observeActivity(reflow)
+	if reflow[0].Unread != 30 {
+		t.Fatalf("reflow minted unread: unread=%d want 30", reflow[0].Unread)
+	}
+
+	// Viewing drains the bank.
+	vp.lock = ViewState{Sess: "bank", Win: "1"}
+	m.observeActivity(bankWindow(12, 150, false))
+	vp.lock = ViewState{Sess: "other", Win: "9"}
+	clock = clock.Add(viewSettleWindow + time.Second)
+	after := bankWindow(12, 150, false)
+	m.observeActivity(after)
+	if after[0].Unread != 0 {
+		t.Fatalf("view did not drain: unread=%d", after[0].Unread)
+	}
+
+	// Departure redraw: growth within the settle window is the panel's own.
+	vp.lock = ViewState{Sess: "bank", Win: "1"}
+	m.observeActivity(bankWindow(13, 150, false))
+	vp.lock = ViewState{Sess: "other", Win: "9"}
+	clock = clock.Add(time.Second)
+	redraw := bankWindow(14, 160, false)
+	m.observeActivity(redraw)
+	if redraw[0].Unread != 0 {
+		t.Fatalf("departure redraw banked lines: unread=%d", redraw[0].Unread)
+	}
+
+	// Real output after the settle banks again; a shrink (clear) wipes the
+	// bank rather than going negative or lying about content that is gone.
+	clock = clock.Add(viewSettleWindow)
+	fresh := bankWindow(15, 200, false)
+	m.observeActivity(fresh)
+	if fresh[0].Unread != 40 {
+		t.Fatalf("post-settle output not banked: unread=%d want 40", fresh[0].Unread)
+	}
+	cleared := bankWindow(15, 50, false)
+	m.observeActivity(cleared)
+	if cleared[0].Unread != 0 {
+		t.Fatalf("shrink went negative or kept a stale bank: unread=%d", cleared[0].Unread)
+	}
+}
+
+// TestPulseRingCadence: marks land in the newest bucket, cells render
+// oldest→newest, and rollover zeroes what time passed by.
+func TestPulseRingCadence(t *testing.T) {
+	r := &pulseRing{}
+	r.mark(100)
+	r.mark(100)
+	cells := r.cells(100)
+	if cells[len(cells)-1] != 2 {
+		t.Fatalf("newest bucket = %v, want trailing 2", cells)
+	}
+	cells = r.cells(103)
+	if cells[len(cells)-1] != 0 || cells[len(cells)-4] != 2 {
+		t.Fatalf("rolled cells = %v, want 2 four from the end", cells)
+	}
+	if got := r.cells(200); got[0] != 0 || got[len(got)-1] != 0 {
+		t.Fatalf("distant rollover kept stale counts: %v", got)
+	}
+}
+
+// TestSparklineRendersOnlyWhenAlive: silence earns no pixels.
+func TestSparklineRendersOnlyWhenAlive(t *testing.T) {
+	if got := sparkline([]uint8{0, 0, 0, 0, 0, 0, 0, 0}); got != "" {
+		t.Fatalf("flat pulse rendered %q", got)
+	}
+	got := sparkline([]uint8{0, 1, 4, 8, 2, 0, 0, 0})
+	if got == "" || len([]rune(got)) != 8 {
+		t.Fatalf("live pulse = %q", got)
+	}
+	if []rune(got)[3] != '█' || []rune(got)[0] != ' ' {
+		t.Fatalf("levels wrong: %q", got)
+	}
+}

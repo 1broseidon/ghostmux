@@ -9,6 +9,8 @@ tmux keeps everything that makes it worth using: persistence, session truth, its
 - **The ambient fleet.** The rail stays up beside your work. Bells, finished commands, and activity in every other session are visible without asking.
 - **Dead slots.** A grouped session that stops becomes a ghost row (`○`) — a declared workspace with a remembered name and directory. `Enter` brings it back. `tmux choose-tree` structurally cannot list what isn't running.
 - **The Return Queue.** `]` jumps the viewport to the oldest window that rang (`●`) or finished (`✓`) unseen, ordered by tmux's own activity timestamps. Viewing drains it; repeated presses walk the queue empty.
+- **Unread terminals.** Rows bank the lines a window produced while unseen (`api ✓ +38`), and `[` shows exactly that output in a pager. The queue says which window wants you; the count says how much happened there.
+- **Pulse.** Agent rows draw a sparkline of observed output cadence (`claude ▂▅█▃▁`) while alive and their quiet age when not — the waveform instead of a guessed "working/idle" label.
 
 ## Requirements
 
@@ -63,6 +65,7 @@ These keys apply while the rail has focus. Press `?` in the panel for the comple
 | `Right` | Focus the viewport unconditionally. |
 | `` ` `` | Toggle back to the previous session and exact window. |
 | `]` | Return Queue: view the oldest unseen `●`/`✓` window. |
+| `[` | Peek the selected row's unseen output in a pager (`j/k` scroll, any other key closes). |
 | `Ctrl+Alt+\` | Switch focus between rail and viewport. |
 | `n` | Create a tmux session. |
 | `a`, `m`, `J` / `K`, `u` | Create a group, preview an organization move, move immediately, or undo the last organization change. |
@@ -71,7 +74,7 @@ These keys apply while the rail has focus. Press `?` in the panel for the comple
 | `/`, `d` | Filter rows, or detach the viewport client. |
 | `?`, `,`, `q` | Open help, open settings, or quit the panel. |
 
-The attention gutter uses `●` for bell, `✓` for a foreground command returning to a shell while unwatched, `~` for activity, `▸` for the viewport target, `○` for a declared session that is not running, and `?` for rows whose state could not be validated this tick. A `◆` after a session name means an outside client is attached to it. The bottom bar's attention cluster is the Return Queue's depth; with the viewport focused, the bar also names the exact session the viewport holds.
+The attention gutter uses `●` for bell, `✓` for a foreground command returning to a shell while unwatched, `~` for activity, `▸` for the viewport target, `○` for a declared session that is not running, and `?` for rows whose state could not be validated this tick. A `◆` after a session name means an outside client is attached to it, and `+N` beside the marks is the number of lines that window produced while unseen. The bottom bar's attention cluster is the Return Queue's depth; with the viewport focused, the bar also names the exact session the viewport holds.
 
 ## Ghosts and the Return Queue
 
@@ -79,7 +82,9 @@ A grouped tmux session that stops becomes a ghost row. Starting it creates a new
 
 The Return Queue is orderable because tmux proves `#{window_activity}` per window: `]` selects the unseen `●`/`✓` window with the oldest timestamp — agent windows first (detected ambiently from the foreground command), plain jobs after — points the viewport at it, and lets the existing clearing paths (native bell clear, `@ghostmux_done` clear-on-view) remove it from the queue. There is no queue state to corrupt — the queue is re-derived from evidence every tick, and a fold never hides a queue entry.
 
-Agent rows also state their quiet time (`claude 4m`) — how long since the window last produced output, from the same timestamp. It is deliberately a fact, not a verb: ghostmux will not claim an agent is "working" or "stuck" from evidence that cannot prove either. `ghostmux doctor` reports which agents are on `PATH` and whether Claude Code's bell hook is wired.
+Agent rows state their evidence instead of a verb: while a window is producing output they draw a sparkline of its observed cadence (`claude ▂▅█▃▁` — eight 8-second buckets of tmux activity advances), and when every bucket is silent they show the quiet age (`claude 26m`). ghostmux will not claim an agent is "working" or "stuck" from evidence that cannot prove either — it draws the waveform and lets you read it. `ghostmux doctor` reports which agents are on `PATH` and whether Claude Code's bell hook is wired.
+
+Unread counts are line arithmetic, not content inspection: a pane's write position is `#{history_size} + #{cursor_y}`, banked only when the window's activity timestamp proves output happened (a resize reflow moves the totals without a byte being emitted and is absorbed). Viewing the window drains its bank; `[` captures the unseen tail lazily, capped at 200 lines with the cap named in the pager title. Full-screen programs are marked `TUI` in the peek because their line history under-describes them.
 
 ## Making agents ring the queue
 
@@ -137,6 +142,10 @@ Queries are outage-safe. If tmux becomes unavailable, the panel keeps the last v
 ghostmux leaves the global `monitor-activity` and `visual-activity` scalar options untouched. Each panel additively leases its own entries in tmux's global session- and window-hook arrays, using a private versioned refresh channel; it never selects or overwrites a fixed array index. Clean exit removes only entries whose exact canonical commands still match that panel's lease. Crash leftovers remain harmless and are reported by `ghostmux doctor`, including the exact `hook[index]` names an operator may inspect or unset; doctor also warns when an active lease is incomplete. PID status in that report is informational only because PIDs can be reused.
 
 Attention marks do not require ghostmux to enable native tmux monitoring. The fleet query tracks stable window IDs and activity timestamps per panel, while still honoring `window_activity_flag` when users enabled monitoring themselves. `@ghostmux_done` remains a per-window user option written by ghostmux.
+
+## Theme
+
+ghostmux ships its engraved gruvbox look by default. `GHOSTMUX_THEME=ansi` renders every color as an ANSI-16 index instead, so the whole panel takes on your terminal's own palette — the panel in your rice, on every box you attach from.
 
 ## Development
 

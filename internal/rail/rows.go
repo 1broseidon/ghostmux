@@ -40,18 +40,21 @@ type railRow struct {
 
 	label      string
 	sess       string
-	window     string // window index (depth-1 rows and flat session rows)
-	active     bool   // tmux's current window of its session
-	attached   bool   // session attached by an outside client (session rows)
-	bell       bool   // ● window_bell_flag
-	done       bool   // ✓ @ghostmux_done (D5)
-	act        bool   // ~ window_activity_flag
-	activityAt int64  // #{window_activity}: when this window last saw output
-	inView     bool   // ▸ locked in the viewport
-	collapsed  bool   // session rows: collapsed in the rail (view-only, set by visibleRows)
-	flat       bool   // single-window session rendered as one row, no children
-	cmd        string // the window's foreground command (flat + window rows); shown dim on flat rows
-	instanceID string // stable tmux session ID captured with this row
+	window     string  // window index (depth-1 rows and flat session rows)
+	active     bool    // tmux's current window of its session
+	attached   bool    // session attached by an outside client (session rows)
+	bell       bool    // ● window_bell_flag
+	done       bool    // ✓ @ghostmux_done (D5)
+	act        bool    // ~ window_activity_flag
+	activityAt int64   // #{window_activity}: when this window last saw output
+	inView     bool    // ▸ locked in the viewport
+	collapsed  bool    // session rows: collapsed in the rail (view-only, set by visibleRows)
+	flat       bool    // single-window session rendered as one row, no children
+	cmd        string  // the window's foreground command (flat + window rows); shown dim on flat rows
+	instanceID string  // stable tmux session ID captured with this row
+	windowID   string  // stable #{window_id} (flat + window rows)
+	unread     int     // banked unseen lines from the panel's ledger
+	pulse      []uint8 // output cadence buckets, oldest→newest
 }
 
 // shellCmds are the foreground commands that count as "back at a prompt" — a
@@ -99,6 +102,31 @@ func agentQuietAge(now time.Time, activityAt int64) string {
 	default:
 		return fmt.Sprintf("%dd", d/(24*60*60))
 	}
+}
+
+// pulseGlyphs maps a bucket count (0..8 activity-advances observed in an
+// 8-second bucket) to a block. Zero is a gap: measured silence renders as
+// silence.
+var pulseGlyphs = []rune(" ▁▂▃▄▅▆▇█")
+
+// sparkline renders cadence cells oldest→newest, or "" when every bucket is
+// silent — a flat pulse earns no pixels; the quiet age says it better.
+func sparkline(cells []uint8) string {
+	live := false
+	out := make([]rune, 0, len(cells))
+	for _, c := range cells {
+		if int(c) >= len(pulseGlyphs) {
+			c = uint8(len(pulseGlyphs) - 1)
+		}
+		if c > 0 {
+			live = true
+		}
+		out = append(out, pulseGlyphs[c])
+	}
+	if !live {
+		return ""
+	}
+	return string(out)
 }
 
 // AddAgentCmds merges user-declared agent commands into the detection set.
@@ -295,10 +323,10 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 			row := railRow{
 				depth: 0, flat: true, label: s.Name, sess: s.Name,
 				window: w.Index, attached: attached, active: w.Active,
-				instanceID: s.SessionID,
-				bell:       w.Bell, done: w.Done, act: w.Activity,
-				activityAt: w.ActivityAt,
-				inView:     isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
+				instanceID: s.SessionID, windowID: w.WindowID,
+				bell: w.Bell, done: w.Done, act: w.Activity,
+				activityAt: w.ActivityAt, unread: w.Unread, pulse: w.Pulse,
+				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
 			}
 			suppressViewedMarks(&row)
 			rows = append(rows, row)
@@ -408,6 +436,7 @@ func matchesFilter(r railRow, query string) bool {
 func suppressViewedMarks(r *railRow) {
 	if r.inView {
 		r.bell, r.done, r.act = false, false, false
+		r.unread = 0
 	}
 }
 

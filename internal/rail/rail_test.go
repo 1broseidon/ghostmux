@@ -244,6 +244,7 @@ func TestRailRows(t *testing.T) {
 			for i := range got {
 				got[i].instanceID = "" // instance provenance has a focused test below
 				got[i].activityAt = 0  // ordering evidence has the Return Queue tests
+				got[i].windowID = ""   // stable-ID provenance has the ledger tests
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("railRows(%q) =\n  %#v\nwant\n  %#v", tc.hub, got, tc.want)

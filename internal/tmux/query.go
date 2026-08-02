@@ -35,6 +35,20 @@ type Window struct {
 	Done       bool     // #{@ghostmux_done}
 	PanePath   string   // #{pane_current_path} of this window's active pane
 	PaneCmds   []string // #{pane_current_command} per pane, in pane order
+	Panes      []PaneStat
+	Unread     int     // panel-augmented by the rail's ledger: banked unseen lines
+	Pulse      []uint8 // panel-augmented output cadence, oldest→newest buckets
+}
+
+// PaneStat is per-pane line evidence for the unread ledger. Lines is the
+// pane's absolute write position — history plus cursor row — which advances
+// as output is printed and scrolls; in the alternate screen only history
+// counts, because the TUI cursor says nothing about emitted lines.
+type PaneStat struct {
+	ID     string // #{pane_id}, stable
+	Lines  int    // #{history_size} + #{cursor_y} (history only when Alt)
+	Alt    bool   // #{alternate_on}
+	Active bool   // #{pane_active}
 }
 
 // Snapshot is one all-or-nothing read of the tmux fleet. Query only publishes
@@ -48,7 +62,7 @@ const (
 	sessionFormat = "#{session_name}\t#{session_id}\t#{session_attached}\t#{session_path}\t#{@ghostmux_view_owner}"
 	clientFormat  = "#{client_session}\t#{client_tty}"
 	windowFormat  = "#{session_name}\t#{session_id}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}\t#{window_activity_flag}\t#{window_activity}\t#{@ghostmux_done}\t#{pane_current_path}"
-	paneFormat    = "#{session_name}\t#{window_index}\t#{pane_current_command}"
+	paneFormat    = "#{session_name}\t#{window_index}\t#{pane_current_command}\t#{pane_id}\t#{history_size}\t#{cursor_y}\t#{alternate_on}\t#{pane_active}"
 )
 
 type clientRow struct {
@@ -60,6 +74,7 @@ type paneRow struct {
 	session string
 	window  string
 	command string
+	stat    PaneStat
 }
 
 type snapshotInconsistencyError struct{ detail string }
@@ -305,13 +320,37 @@ func parsePanes(out string) ([]paneRow, error) {
 	panes := make([]paneRow, 0, len(lines))
 	for i, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 3 || fields[0] == "" || fields[1] == "" {
+		// Legacy 3-field fixtures parse without line evidence; production
+		// sends the full 8-field row.
+		if (len(fields) != 3 && len(fields) != 8) || fields[0] == "" || fields[1] == "" {
 			return nil, malformedRow("list-panes", i, line)
 		}
 		if index, err := strconv.Atoi(fields[1]); err != nil || index < 0 {
 			return nil, malformedRow("list-panes", i, line)
 		}
-		panes = append(panes, paneRow{session: fields[0], window: fields[1], command: fields[2]})
+		row := paneRow{session: fields[0], window: fields[1], command: fields[2]}
+		if len(fields) == 8 {
+			history, err := strconv.Atoi(fields[4])
+			if err != nil || history < 0 {
+				return nil, malformedRow("list-panes", i, line)
+			}
+			cursor, err := strconv.Atoi(fields[5])
+			if err != nil || cursor < 0 {
+				return nil, malformedRow("list-panes", i, line)
+			}
+			row.stat = PaneStat{
+				ID:     fields[3],
+				Alt:    fields[6] == "1",
+				Active: fields[7] == "1",
+			}
+			// In the alternate screen the cursor is the TUI's, not a write
+			// position; only scrolled history is honest line evidence there.
+			row.stat.Lines = history
+			if !row.stat.Alt {
+				row.stat.Lines = history + cursor
+			}
+		}
+		panes = append(panes, row)
 	}
 	return panes, nil
 }
@@ -389,6 +428,7 @@ func linkAndValidateSnapshot(sessions []Session, clients []clientRow, windows []
 			return inconsistentSnapshot("pane references unknown window %q", key)
 		}
 		window.PaneCmds = append(window.PaneCmds, pane.command)
+		window.Panes = append(window.Panes, pane.stat)
 		paneCounts[key]++
 	}
 	for i := range windows {
@@ -478,4 +518,23 @@ func SetDone(sess, index string, on bool) {
 // PaneDead reports whether a pane (by %id) is dead.
 func PaneDead(paneID string) bool {
 	return strings.TrimSpace(Output("display-message", "-p", "-t", paneID, "#{pane_dead}")) == "1"
+}
+
+// CaptureTail returns up to lines of the most recent content of a pane —
+// visible screen plus enough history to cover the request. This is the peek
+// path's fetch: the unread COUNT comes from the ledger's line arithmetic;
+// the text is captured lazily, only when the operator asks to see it.
+func CaptureTail(paneID string, lines int) ([]string, error) {
+	if lines < 1 {
+		return nil, nil
+	}
+	out, err := Runner("capture-pane", "-p", "-t", paneID, "-S", "-"+strconv.Itoa(lines))
+	if err != nil {
+		return nil, err
+	}
+	all := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(all) > lines {
+		all = all[len(all)-lines:]
+	}
+	return all, nil
 }

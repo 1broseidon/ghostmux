@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"os"
 	"strings"
 
@@ -25,15 +26,15 @@ import (
 // theme is unknown; a hardcoded ground only "engraves" on the one theme that
 // happens to match it and renders as a solid strip on every other. The
 // terminal's own ground is the panel ground.
-const (
-	hexBarFg = "#928374"
-	hexBarKey    = "#fabd2f" // keys pop; their labels do not
-	hexBarHost   = "#665c54"
-	hexBarLeader = "#3c3836" // dotted rule + leader: texture, not a border
-	hexMarkRail  = "#d79921" // spine+wordmark when the rail owns the keys
-	hexMarkVp    = "#8ec07c" // spine+wordmark when the viewport owns the keys
-	hexBarBell   = "#fb4934"
-	hexBarDone   = "#b8bb26"
+var (
+	hexBarFg     = theme.C("#928374", "8")
+	hexBarKey    = theme.C("#fabd2f", "3") // keys pop; their labels do not
+	hexBarHost   = theme.C("#665c54", "8")
+	hexBarLeader = theme.C("#3c3836", "0")  // dotted rule + leader: texture, not a border
+	hexMarkRail  = theme.C("#d79921", "3")  // spine+wordmark when the rail owns the keys
+	hexMarkVp    = theme.C("#8ec07c", "14") // spine+wordmark when the viewport owns the keys
+	hexBarBell   = theme.C("#fb4934", "1")
+	hexBarDone   = theme.C("#b8bb26", "10")
 
 	// statusInset is the left/right float margin in cells. statusChromeRows is
 	// the rule row plus the caption; cramped frames drop the rule.

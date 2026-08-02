@@ -13,6 +13,7 @@ package app
 import (
 	"context"
 	"errors"
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"os"
 	"os/exec"
 	"strings"
@@ -64,6 +65,7 @@ type soloModel struct {
 	// behavior, one place — so no second interception can drift out of sync
 	// with this one.
 	overlayHelp bool
+	peek        *peekOverlay   // the [ unseen-output pager, nil when closed
 	settings    *settingsModel // nil = not in settings mode
 }
 
@@ -213,6 +215,9 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// that did two things at once would be one the user cannot use to mean
 		// either. While settings is open, keys are its own and the toggle is
 		// inert: there is no viewport on screen to hand the keyboard to.
+		if m.peek != nil {
+			return m.updatePeekKey(msg), nil
+		}
 		if m.overlayHelp {
 			return m.closeOverlay(), nil
 		}
@@ -230,6 +235,13 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case ",":
 				return m.openSettings(), nil
+			case "[":
+				// Peek is the queue's sibling: ] jumps to the oldest unseen,
+				// [ shows the selected row's unseen without moving anything.
+				if title, lines, ok := m.rail.UnreadPeek(); ok {
+					m.peek = &peekOverlay{title: title, lines: lines}
+				}
+				return m, nil
 			}
 		}
 		if !msg.Paste && m.toggles[msg.String()] {
@@ -257,6 +269,17 @@ func (m soloModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // the rail has focus should hit the viewport, and vice versa. A press inside
 // the viewport also moves focus there, which is what a click means.
 func (m soloModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.peek != nil {
+		switch {
+		case msg.Button == tea.MouseButtonWheelUp:
+			m.peek.scroll(-3)
+		case msg.Button == tea.MouseButtonWheelDown:
+			m.peek.scroll(3)
+		case msg.Action == tea.MouseActionPress:
+			m.peek = nil
+		}
+		return m, nil
+	}
 	if m.overlayHelp {
 		if msg.Action == tea.MouseActionPress {
 			return m.closeOverlay(), nil
@@ -366,6 +389,9 @@ func (m soloModel) View() string {
 	if m.overlayHelp {
 		return helpOverlay(b.String(), m.w, m.h)
 	}
+	if m.peek != nil {
+		return peekOverlayView(b.String(), m.peek, m.w, m.h)
+	}
 	return b.String()
 }
 
@@ -389,11 +415,11 @@ func (m soloModel) viewportView(w, h int) string {
 	return m.vp.w.View()
 }
 
-const (
-	hexDividerIdle = "#504945"
-	hexDividerRail = "#98971a"
-	hexIdleAccent  = "#fe8019"
-	hexIdleText    = "#504945"
+var (
+	hexDividerIdle = theme.C("#504945", "8")
+	hexDividerRail = theme.C("#98971a", "2")
+	hexIdleAccent  = theme.C("#fe8019", "9")
+	hexIdleText    = theme.C("#504945", "8")
 )
 
 // idleView centers rail.IdleLines in a w×h block — the same placeholder

@@ -419,6 +419,64 @@ if grep -q '"tmux:ghosty"' "$GJSON" 2>/dev/null; then
 else pass "ghost: declaration pruned from the state file"; fi
 send "q"; sleep 0.5
 
+# --- unread: banked unseen output, the [ peek, and drain on view ---
+# The ledger's count is line arithmetic from #{history_size}+#{cursor_y};
+# the text is captured only when [ asks. Viewing drains the bank.
+# Self-contained: its own fixture sessions, its own state dir.
+tmux $TA kill-session -t zdriver 2>/dev/null
+tmux $TA kill-session -t banker 2>/dev/null
+tmux $TA kill-session -t ubase 2>/dev/null
+tmux $TA new-session -d -s ubase -x 80 -y 20
+tmux $TA new-session -d -s banker -x 80 -y 20
+tmux $TA new-session -d -s zdriver -x 120 -y 32
+USTATE=$(mktemp -d)
+tmux $TA send-keys -t zdriver "XDG_STATE_HOME='$USTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
+sleep 3
+
+# Output lands in banker while nothing watches it.
+tmux $TA send-keys -t banker "printf 'UNREAD-MARK-%s\\n' alpha beta gamma; seq 1 12" Enter
+sleep 3
+if cap | grep -E "banker.*\+[0-9]+" >/dev/null; then
+  pass "unread: banked lines render as +N on the row"
+else fail "unread: no +N after unseen output"; cap | head -12; fi
+
+send "/"
+tmux $TA send-keys -t zdriver "banker"; sleep 0.5
+send "" Enter
+send "j"
+send "["
+sleep 1
+if cap | grep -q "unseen"; then pass "unread: [ opened the peek pager"
+else fail "unread: no pager after ["; cap | head -16; fi
+if cap | grep -q "UNREAD-MARK-gamma"; then pass "unread: the peek shows the banked output"
+else fail "unread: banked text missing from the peek"; cap | head -20; fi
+send "" Escape
+if cap | grep -q "unseen"; then fail "unread: pager survived escape"; cap | head -8
+else pass "unread: escape closed the pager"; fi
+
+# Viewing the window drains the bank; the departure settle keeps it drained.
+send "" Enter
+sleep 2
+send "d"
+sleep 4
+if cap | grep -E "banker.*\+[0-9]+" >/dev/null; then
+  fail "unread: bank survived viewing"; cap | head -10
+else pass "unread: viewing drained the bank"; fi
+send "q"; sleep 0.5
+
+# --- theme: GHOSTMUX_THEME=ansi renders the panel in the terminal palette ---
+tmux $TA kill-session -t zdriver 2>/dev/null
+tmux $TA new-session -d -s zdriver -x 120 -y 32
+tmux $TA send-keys -t zdriver "GHOSTMUX_THEME=ansi XDG_STATE_HOME='$USTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
+sleep 2.5
+if cap | grep -q "gmx" && cap | grep -q "ubase"; then
+  pass "theme: ansi mode renders the frame and fleet"
+else fail "theme: ansi mode broke the frame"; cap | head -10; fi
+send "q"; sleep 0.5
+tmux $TA kill-session -t banker 2>/dev/null
+tmux $TA kill-session -t ubase 2>/dev/null
+
+
 echo
 [ $FAIL -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit $FAIL

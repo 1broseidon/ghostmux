@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"os/exec"
 	"runtime/debug"
 	"sort"
@@ -44,14 +45,14 @@ func sectionFields(sec section) int {
 	return 0
 }
 
-const (
-	hexSetCursorBg = "#504945"
-	hexSetName     = "#ebdbb2"
-	hexSetLabel    = "#928374"
-	hexSetValue    = "#8ec07c"
-	hexSetHint     = "#665c54"
-	hexSetErr      = "#fb4934"
-	hexSetTitle    = "#fe8019"
+var (
+	hexSetCursorBg = theme.C("#504945", "8")
+	hexSetName     = theme.C("#ebdbb2", "7")
+	hexSetLabel    = theme.C("#928374", "8")
+	hexSetValue    = theme.C("#8ec07c", "14")
+	hexSetHint     = theme.C("#665c54", "8")
+	hexSetErr      = theme.C("#fb4934", "1")
+	hexSetTitle    = theme.C("#fe8019", "9")
 )
 
 var (

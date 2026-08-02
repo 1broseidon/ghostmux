@@ -1,8 +1,11 @@
 package app
 
 import (
+	"fmt"
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
@@ -29,19 +32,19 @@ type boxLine struct {
 	width int
 }
 
-const (
-	hexOverlayBg     = "#1d2021" // one step below the bar: the box sits on top
-	hexOverlayBorder = "#504945"
-	hexOverlayTitle  = "#fe8019"
-	hexOverlayKey    = "#fabd2f"
-	hexOverlayDesc   = "#a89984"
-	hexOverlayFoot   = "#665c54"
+var (
+	hexOverlayBg     = theme.C("#1d2021", "0") // one step below the bar: the box sits on top
+	hexOverlayBorder = theme.C("#504945", "8")
+	hexOverlayTitle  = theme.C("#fe8019", "9")
+	hexOverlayKey    = theme.C("#fabd2f", "3")
+	hexOverlayDesc   = theme.C("#a89984", "7")
+	hexOverlayFoot   = theme.C("#665c54", "8")
 
-	hexLegendBell  = "#fb4934"
-	hexLegendDone  = "#b8bb26"
-	hexLegendAct   = "#fabd2f"
-	hexLegendView  = "#fe8019"
-	hexLegendGhost = "#665c54"
+	hexLegendBell  = theme.C("#fb4934", "1")
+	hexLegendDone  = theme.C("#b8bb26", "10")
+	hexLegendAct   = theme.C("#fabd2f", "3")
+	hexLegendView  = theme.C("#fe8019", "9")
+	hexLegendGhost = theme.C("#665c54", "8")
 
 	overlayMaxWidth = 56
 )
@@ -192,4 +195,91 @@ func truncateRunes(s string, width int) string {
 		return "…"
 	}
 	return string(r[:width-1]) + "…"
+}
+
+// peekOverlay is the [ pager: the selected row's unseen output, scrollable.
+// Unlike help it must hold j/k for scrolling, so only non-scroll keys close.
+type peekOverlay struct {
+	title  string
+	lines  []string
+	offset int
+}
+
+func (p *peekOverlay) scroll(delta int) { p.offset += delta }
+
+// updatePeekKey routes keys while the pager is up: j/k and arrows scroll,
+// g/G jump, everything else closes — the overlay contract, minus the keys
+// scrolling needs.
+func (m soloModel) updatePeekKey(msg tea.KeyMsg) soloModel {
+	switch msg.String() {
+	case "j", "down":
+		m.peek.scroll(1)
+	case "k", "up":
+		m.peek.scroll(-1)
+	case "g":
+		m.peek.offset = 0
+	case "G":
+		m.peek.offset = len(m.peek.lines)
+	default:
+		m.peek = nil
+	}
+	return m
+}
+
+const peekMaxWidth = 76
+
+// peekOverlayView composites the pager over a finished frame, help-box style.
+func peekOverlayView(base string, p *peekOverlay, frameWidth, frameHeight int) string {
+	w := min(peekMaxWidth, frameWidth-4)
+	if w < 16 || frameHeight < 8 {
+		return base
+	}
+	inner := w - 4
+	body := frameHeight - 8 // borders, title, footer, breathing room
+	if body < 3 {
+		body = 3
+	}
+	if body > len(p.lines) {
+		body = len(p.lines)
+	}
+	maxOffset := len(p.lines) - body
+	if p.offset > maxOffset {
+		p.offset = maxOffset
+	}
+	if p.offset < 0 {
+		p.offset = 0
+	}
+
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color(hexOverlayBorder)).Background(lipgloss.Color(hexOverlayBg))
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(hexOverlayTitle)).Background(lipgloss.Color(hexOverlayBg)).Bold(true)
+	text := lipgloss.NewStyle().Foreground(lipgloss.Color(hexOverlayDesc)).Background(lipgloss.Color(hexOverlayBg))
+	foot := lipgloss.NewStyle().Foreground(lipgloss.Color(hexOverlayFoot)).Background(lipgloss.Color(hexOverlayBg))
+
+	titleText := " " + p.title + " "
+	if len([]rune(titleText)) > w-4 {
+		titleText = truncateRunes(titleText, w-4)
+	}
+	dashes := w - 2 - 1 - len([]rune(titleText))
+	out := []string{border.Render("╭─") + title.Render(titleText) + border.Render(strings.Repeat("─", max(dashes, 0))+"╮")}
+	pad := func(body string, width int) string {
+		if pad := inner - width; pad > 0 {
+			return body + lipgloss.NewStyle().Background(lipgloss.Color(hexOverlayBg)).Render(strings.Repeat(" ", pad))
+		}
+		return body
+	}
+	for _, line := range p.lines[p.offset : p.offset+body] {
+		line = truncateRunes(ansi.Strip(line), inner)
+		out = append(out, border.Render("│ ")+pad(text.Render(line), len([]rune(line)))+border.Render(" │"))
+	}
+	position := fmt.Sprintf("%d–%d/%d · j/k scroll · any key closes", p.offset+1, p.offset+body, len(p.lines))
+	position = truncateRunes(position, inner)
+	out = append(out, border.Render("│ ")+pad(foot.Render(position), len([]rune(position)))+border.Render(" │"))
+	out = append(out, border.Render("╰"+strings.Repeat("─", w-2)+"╯"))
+
+	x := (frameWidth - w) / 2
+	y := (frameHeight - len(out)) / 2
+	if y < 1 {
+		y = 1
+	}
+	return compose(base, out, x, y)
 }
