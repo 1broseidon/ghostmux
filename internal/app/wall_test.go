@@ -410,3 +410,32 @@ func TestPendingRetirementOnFailedShadowKillIsRetainedAndRetried(t *testing.T) {
 		t.Fatalf("later heal did not finish the retained retirement: dead=%v err=%v pending=%+v", dead, err, v.pendingRetirements)
 	}
 }
+
+// TestPointAfterWallClearsWallState is the "tmux unavailable: probe tmux
+// session: empty name" regression: pointing at a session while walled must
+// clear the wall's logical state with its session, or every subsequent heal
+// probes an empty wall name forever and the lock keeps claiming a wall.
+func TestPointAfterWallClearsWallState(t *testing.T) {
+	fake := useFakeViewTmux(t)
+	v := newTestViewport(t)
+	bindFakeChild(v)
+
+	v.PointWall("agents", []string{"ada", "ifrit"})
+	if lock := v.Lock(); !lock.Wall {
+		t.Fatalf("wall did not come up: %+v", lock)
+	}
+
+	v.Point("metro", "", false)
+	if lock := v.Lock(); lock.Wall || lock.Sess != "metro" {
+		t.Fatalf("point after wall left wall state: %+v", lock)
+	}
+	fake.calls = nil
+	if dead, err := v.Heal(); err != nil || dead {
+		t.Fatalf("heal after point-from-wall = (%v, %v), want quiet (false, nil)", dead, err)
+	}
+	for _, c := range fake.calls {
+		if strings.Contains(c, "probe") && strings.Contains(c, `""`) {
+			t.Fatalf("heal probed an empty name: %v", fake.calls)
+		}
+	}
+}

@@ -236,6 +236,10 @@ func (v *ptyViewport) stopCurrent() error {
 	pendingErr := v.retryPendingRetirements()
 	currentErr := v.retireCurrentView()
 	wallErr := v.retireCurrentWall()
+	// Every replacement path funnels through here, so the wall's logical
+	// state dies with its session — a stale wallGroup would keep Lock()
+	// claiming a wall and send every heal probing an empty name.
+	v.wallGroup = ""
 	return joinViewportErrors(pendingErr, currentErr, wallErr)
 }
 
