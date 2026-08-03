@@ -151,7 +151,11 @@ func (m soloModel) captionLine(width int) string {
 	case m.focus == focusViewport:
 		mark, keys = styWordmarkVp, viewportKeys(m.toggleLabel, m.viewingLabel())
 	}
-	left := mark.Render("▎gmx")
+	// The wordmark is the ghost itself — ᗣ, the glyph text Pac-Man taught a
+	// generation to read as "ghost". It wears the focus color like the text
+	// mark it replaced: gold when the rail owns the keys, green when the
+	// viewport does.
+	left := mark.Render("▎ᗣ")
 	lw := lipgloss.Width(left)
 
 	bells, done := m.rail.AttentionSummary()

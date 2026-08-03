@@ -183,7 +183,7 @@ func TestStatusLineFillsExactWidth(t *testing.T) {
 			}
 		}
 		plain := ansi.Strip(got)
-		if !strings.Contains(plain, "gmx") || !strings.Contains(plain, "─") {
+		if !strings.Contains(plain, "ᗣ") || !strings.Contains(plain, "─") {
 			t.Errorf("statusLine(%d) missing caption chrome: %q", w, plain)
 		}
 		if w >= 80 {
@@ -217,7 +217,7 @@ func TestWideStatusLineIsCuratedCaption(t *testing.T) {
 	m := newSolo(newTestViewport(t))
 	m.w, m.h = 240, 40
 	plain := ansi.Strip(m.statusLine(240))
-	for _, want := range []string{"▎gmx", "h/l fold", "` prev", "─", "?", "keys"} {
+	for _, want := range []string{"▎ᗣ", "h/l fold", "` prev", "─", "?", "keys"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("wide status line missing %q: %q", want, plain)
 		}
@@ -244,7 +244,7 @@ func TestFloatingFooterHasInsetRuleAboveCaption(t *testing.T) {
 	if inner == "" || strings.Trim(inner, "─") != "" {
 		t.Fatalf("rule inner is not dotted: %q", rule)
 	}
-	if !strings.HasPrefix(caption, " ") || !strings.Contains(caption, "▎gmx") {
+	if !strings.HasPrefix(caption, " ") || !strings.Contains(caption, "▎ᗣ") {
 		t.Fatalf("caption is not side-inset wordmark: %q", caption)
 	}
 }
@@ -267,7 +267,7 @@ func TestViewportStatusLineKeepsCaptionRhythm(t *testing.T) {
 	m := newSolo(newTestViewport(t))
 	m.w, m.h = 160, 40
 	vpBar := ansi.Strip(m.setFocus(focusViewport).statusLine(160))
-	if !strings.Contains(vpBar, "▎gmx") || !strings.Contains(vpBar, "─") || !strings.Contains(vpBar, "back to rail") {
+	if !strings.Contains(vpBar, "▎ᗣ") || !strings.Contains(vpBar, "─") || !strings.Contains(vpBar, "back to rail") {
 		t.Fatalf("viewport bar lost caption rhythm: %q", vpBar)
 	}
 	if strings.Contains(vpBar, "move") {

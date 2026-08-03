@@ -65,7 +65,7 @@ if [ -n "$LEASE_CHANNELS" ] && [ "$(echo "$LEASE_CHANNELS" | wc -l)" -eq 1 ] && 
 else fail "tmux lease: expected one complete eight-hook lease (entries=$LEASE_COUNT channels=$LEASE_CHANNELS)"; fi
 
 # --- frame chrome ---
-if cap | grep -q "gmx"; then pass "bar: gmx wordmark rendered"
+if cap | grep -q "ᗣ"; then pass "bar: the ghost wordmark rendered"
 else fail "bar: no gmx wordmark"; cap | tail -3; fi
 
 if cap | grep -q "alpha"; then pass "rail: scratch session listed"
@@ -250,7 +250,7 @@ tmux $TA new-session -d -s notmux -x 100 -y 30
 tmux $TA send-keys -t notmux "PATH=/nonexistent-bin $BIN" Enter
 sleep 2
 NOTMUX=$(tmux $TA capture-pane -p -t notmux)
-if echo "$NOTMUX" | grep -q "gmx"; then
+if echo "$NOTMUX" | grep -q "ᗣ"; then
   pass "no-tmux: frame still runs with tmux off PATH"
 else fail "no-tmux: frame did not start without tmux"; echo "$NOTMUX" | head -6; fi
 tmux $TA send-keys -t notmux "q"; sleep 0.5
@@ -597,7 +597,7 @@ tmux $TA kill-session -t zdriver 2>/dev/null
 tmux $TA new-session -d -s zdriver -x 120 -y 32
 tmux $TA send-keys -t zdriver "GHOSTMUX_THEME=ansi XDG_STATE_HOME='$USTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
 sleep 2.5
-if cap | grep -q "gmx" && cap | grep -q "ubase"; then
+if cap | grep -q "ᗣ" && cap | grep -q "ubase"; then
   pass "theme: ansi mode renders the frame and fleet"
 else fail "theme: ansi mode broke the frame"; cap | head -10; fi
 send "q"; sleep 0.5
