@@ -221,6 +221,35 @@ func TestPointWallCreatesShadowsThenTheTiledCompositeThenAttaches(t *testing.T) 
 	if v.AttachTarget() != v.wall.Name {
 		t.Fatalf("AttachTarget() = %q, want the wall session %q", v.AttachTarget(), v.wall.Name)
 	}
+
+	// SPEC-OWNED-CHROME: origins (never shadow gm-view-* names) and the two
+	// theme-resolved colors this package threads down must reach CreateWall,
+	// landing as chrome commands against the wall's exact session ID.
+	wallID := v.wall.SessionID
+	wantChrome := []string{
+		"set-option -t " + wallID + " status off",
+		"set-option -t " + wallID + " -w pane-border-style fg=" + wallBorderDim,
+		"set-option -t " + wallID + " -w pane-active-border-style fg=" + wallBorderAccent,
+		"select-pane -t " + wallID + " -T alpha",
+		"select-pane -t " + wallID + " -T beta",
+	}
+	for _, want := range wantChrome {
+		found := false
+		for _, c := range fake.calls {
+			if c == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("wall chrome missing %q in %v", want, fake.calls)
+		}
+	}
+	for _, c := range fake.calls {
+		if strings.Contains(c, "gm-view") && strings.HasPrefix(c, "select-pane") {
+			t.Fatalf("pane title leaked a shadow name instead of an origin: %q", c)
+		}
+	}
 }
 
 // TestPointWallTeardownRetiresWallAndEveryShadowExactlyOnce: v again (or d,

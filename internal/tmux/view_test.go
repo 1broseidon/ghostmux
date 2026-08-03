@@ -50,8 +50,8 @@ func TestCreateViewUsesDetachedCreationAndStableSessionID(t *testing.T) {
 	if !reflect.DeepEqual(ref, wantRef) {
 		t.Fatalf("CreateView ref = %+v, want %+v", ref, wantRef)
 	}
-	if len(calls) != 4 {
-		t.Fatalf("CreateView calls = %v, want create/tag/status/select", calls)
+	if len(calls) != 5 {
+		t.Fatalf("CreateView calls = %v, want create/tag/status-off/status-left/select", calls)
 	}
 	create := strings.Join(calls[0], " ")
 	for _, want := range []string{"new-session -d -P -F #{session_id}", "-s gm-view-panel-1", "-t =alpha"} {
@@ -64,6 +64,9 @@ func TestCreateViewUsesDetachedCreationAndStableSessionID(t *testing.T) {
 	}
 	if got := strings.Join(calls[1], " "); got != "set-option -t $42 @ghostmux_view_owner v1:gm-view-panel-1" {
 		t.Fatalf("owner was not the first stable-ID configuration: %q", got)
+	}
+	if got := strings.Join(calls[2], " "); got != "set-option -t $42 status off" {
+		t.Fatalf("status off was not emitted right after tagging: %q", got)
 	}
 	for _, call := range calls[1:] {
 		joined := strings.Join(call, " ")
@@ -141,6 +144,99 @@ func TestCreateViewFailureCleanupStartsOnlyAfterTag(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCreateWallEmitsOwnedChromeAndOriginTitles pins SPEC-OWNED-CHROME's
+// mechanics for the wall composite: status off, the four window-level border
+// options, and one select-pane -T per member titled with its ORIGIN name
+// (never the shadow's gm-view-* name) — every one of them targeting the
+// wall's own exact session ID, none of it able to fail creation.
+func TestCreateWallEmitsOwnedChromeAndOriginTitles(t *testing.T) {
+	orig := Runner
+	var calls [][]string
+	Runner = func(args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "new-session" {
+			return "$5\n", nil
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { Runner = orig })
+
+	shadows := []ViewRef{
+		{Name: "gm-view-a", SessionID: "$1", Owner: "v1:gm-view-a"},
+		{Name: "gm-view-b", SessionID: "$2", Owner: "v1:gm-view-b"},
+	}
+	origins := []string{"ada", "beastie"}
+
+	ref, err := CreateWall("wall-1", shadows, origins, "#504945", "#fe8019", 80, 24)
+	if err != nil {
+		t.Fatalf("CreateWall: %v", err)
+	}
+	if ref.SessionID != "$5" {
+		t.Fatalf("wall session id = %q, want $5", ref.SessionID)
+	}
+
+	want := []string{
+		"set-option -t $5 status off",
+		"set-option -t $5 -w pane-border-status top",
+		"set-option -t $5 -w pane-border-format  #{pane_title} ",
+		"set-option -t $5 -w pane-border-style fg=#504945",
+		"set-option -t $5 -w pane-active-border-style fg=#fe8019",
+		"select-pane -t $5 -T ada",
+		"select-pane -t $5 -T beastie",
+	}
+	for _, w := range want {
+		found := false
+		for _, c := range calls {
+			if strings.Join(c, " ") == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing wall chrome call %q in %v", w, calls)
+		}
+	}
+	for _, c := range calls {
+		if len(c) < 3 || c[1] != "-t" {
+			continue
+		}
+		if strings.Contains(c[0], "set-option") || strings.Contains(c[0], "select-pane") {
+			if c[2] != "$5" {
+				t.Errorf("chrome call did not target the exact wall session id: %v", c)
+			}
+		}
+	}
+}
+
+// TestCreateWallStylingFailureDoesNotFailCreation pins law 2 for the wall:
+// every styling command can fail and the wall still comes up, unstyled.
+func TestCreateWallStylingFailureDoesNotFailCreation(t *testing.T) {
+	orig := Runner
+	Runner = func(args ...string) (string, error) {
+		if args[0] == "new-session" {
+			return "$9\n", nil
+		}
+		if args[0] == "select-pane" {
+			return "", errors.New("styling unavailable")
+		}
+		if args[0] == "set-option" && !(len(args) > 3 && args[3] == viewOwnerOption) {
+			// Every set-option except the ownership tag itself is chrome here.
+			return "", errors.New("styling unavailable")
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { Runner = orig })
+
+	shadows := []ViewRef{{Name: "gm-view-a", SessionID: "$1", Owner: "v1:gm-view-a"}}
+	ref, err := CreateWall("wall-2", shadows, []string{"ada"}, "#504945", "#fe8019", 0, 0)
+	if err != nil {
+		t.Fatalf("CreateWall failed despite only styling commands failing: %v", err)
+	}
+	if ref.SessionID != "$9" {
+		t.Fatalf("wall session id = %q, want $9", ref.SessionID)
+	}
 }
 
 func TestIsOwnedViewRequiresExactNameBoundMarker(t *testing.T) {

@@ -181,6 +181,16 @@ else fail "ownership: no exactly tagged grouped shadow"; tmux $TA list-sessions 
 if [ -n "$VIEW1" ] && ! cap | grep -q "$VIEW1"; then pass "ownership: valid owned shadow hidden from the rail"
 else fail "ownership: owned shadow visible in the rail"; cap | head -14; fi
 
+# SPEC-OWNED-CHROME: a single grouped view's shadow runs status off, so the
+# operator's rendered capture (what the nested attach draws into the embedded
+# terminal) never shows the internal "[gm-view-..." truncation leak.
+if [ -n "$VIEW1" ] && ! cap | grep -q "\[gm-view"; then
+  pass "chrome: single grouped view capture shows no [gm-view leak"
+else fail "chrome: single grouped view capture leaked an internal name"; cap | head -14; fi
+if [ -n "$VIEW1" ] && [ "$(tmux $TA show-options -v -t "$VIEW1" status 2>/dev/null)" = "off" ]; then
+  pass "chrome: grouped shadow session runs with status off"
+else fail "chrome: grouped shadow status = $(tmux $TA show-options -v -t "$VIEW1" status 2>/dev/null)"; fi
+
 send "d"
 if [ -n "$VIEW1" ] && ! tmux $TA has-session -t "=$VIEW1" 2>/dev/null; then
   pass "ownership: detach cleaned the exact owned shadow"
@@ -529,6 +539,30 @@ SHADOWCOUNT=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}
   awk '$1 ~ /^gm-view-/ && $2 == "v1:" $1' | wc -l)
 if [ "$SHADOWCOUNT" -ge 2 ]; then pass "wall: an owned gm-view- shadow exists per member"
 else fail "wall: expected >=2 owned member shadows, found $SHADOWCOUNT"; fi
+
+# SPEC-OWNED-CHROME: border titles carry the members' ORIGIN names, never the
+# owned shadow's gm-view-* name, and no gm-view string reaches the rendered
+# capture the operator actually sees.
+BORDERTITLES=$(tmux $TA list-panes -t "$WALLSESS" -F '#{pane_title}' 2>/dev/null | sort)
+if echo "$BORDERTITLES" | grep -qx "crew1" && echo "$BORDERTITLES" | grep -qx "crew2"; then
+  pass "chrome: wall pane border titles show member ORIGIN names"
+else fail "chrome: wall border titles = $BORDERTITLES"; fi
+if echo "$BORDERTITLES" | grep -q "gm-view"; then
+  fail "chrome: wall border title leaked a shadow name"
+else pass "chrome: wall border titles carry no gm-view- name"; fi
+if cap | grep -q "gm-view"; then
+  fail "chrome: walled capture leaked the string gm-view"
+else pass "chrome: walled capture contains no gm-view string"; fi
+
+# Members themselves must be provably untouched: no session or window option
+# ghostmux wrote to the wall/shadows reached the member's own real session.
+for MEMBER in crew1 crew2; do
+  MEMBER_SESS_OPTS=$(tmux $TA show-options -t "$MEMBER" 2>/dev/null)
+  MEMBER_WIN_OPTS=$(tmux $TA show-options -w -t "$MEMBER" 2>/dev/null)
+  if echo "$MEMBER_SESS_OPTS" | grep -q '^status ' || echo "$MEMBER_WIN_OPTS" | grep -qE '^pane-border-(status|format|style)|^pane-active-border-style'; then
+    fail "chrome: member $MEMBER received owned styling options"; echo "$MEMBER_SESS_OPTS"; echo "$MEMBER_WIN_OPTS"
+  else pass "chrome: member $MEMBER show-options proves it is unstyled"; fi
+done
 
 if cap | grep -qE "crew1.*●" || cap | grep -qE "crew2.*●"; then
   fail "wall: member bells survived walling"; cap | head -14

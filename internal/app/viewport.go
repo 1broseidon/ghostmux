@@ -9,7 +9,16 @@ import (
 
 	"github.com/1broseidon/ghostmux/internal/rail"
 	"github.com/1broseidon/ghostmux/internal/term"
+	"github.com/1broseidon/ghostmux/internal/theme"
 	"github.com/1broseidon/ghostmux/internal/tmux"
+)
+
+// Wall border colors resolve through the theme seam like every other color
+// (SPEC-OWNED-CHROME law 4), then through theme.Tmux once so tmux.CreateWall
+// receives an opaque, already-spelled style value and never hand-converts.
+var (
+	wallBorderDim    = theme.Tmux(theme.C("#504945", "8"))
+	wallBorderAccent = theme.Tmux(theme.C("#fe8019", "9"))
 )
 
 // retireKind selects which ownership-checked kill a retained capability needs
@@ -189,7 +198,7 @@ func (v *ptyViewport) PointWall(group string, members []string) {
 	v.sequence++
 	wallIdentity := tmux.ViewIdentity(v.panelNonce, v.sequence)
 	cols, rows := v.w.Size()
-	wall, err := tmux.CreateWall(wallIdentity, shadows, cols, rows)
+	wall, err := tmux.CreateWall(wallIdentity, shadows, origins, wallBorderDim, wallBorderAccent, cols, rows)
 	if err != nil {
 		_ = v.retireRef(wall, retireWallSession)
 		for _, ref := range shadows {

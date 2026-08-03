@@ -97,6 +97,10 @@ func CreateView(target, win, identity string) (ViewRef, error) {
 		// not allowed to infer ownership from the name.
 		return ViewRef{}, fmt.Errorf("tag view %q: %w", name, err)
 	}
+	// Chrome may fail; the view may not (law 2). status off is cosmetic —
+	// it removes the "[gm-view-…" truncation leak from the shadow's own
+	// status bar — so its result is discarded rather than aborting creation.
+	styleBestEffort("set-option", "-t", sessionID, "status", "off")
 	if err := Run("set-option", "-t", sessionID, "status-left", "["+target+"] "); err != nil {
 		return ref, fmt.Errorf("configure view %q status: %w", name, err)
 	}
@@ -150,7 +154,14 @@ func AttachSessionArgv(sess, win string) []string {
 // retain and retry ownership-checked cleanup. Panes run through wallPaneCommand,
 // never a direct attach: a direct attach to a member would join the user's
 // other clients and fight them for window focus.
-func CreateWall(identity string, shadows []ViewRef, width, height int) (ViewRef, error) {
+//
+// origins is shadows' member ORIGIN names, index-aligned, engraved into pane
+// border titles instead of the shadow's own gm-view-* name (law 3). borderDim
+// and borderAccent are already theme-resolved, tmux-spelled style colors
+// (see theme.Tmux) — this package treats them as opaque values. Every
+// styling call here is best-effort (law 2): chrome may fail, the wall may
+// not, so none of it can abort creation or return an error.
+func CreateWall(identity string, shadows []ViewRef, origins []string, borderDim, borderAccent string, width, height int) (ViewRef, error) {
 	if !validViewIdentity(identity) {
 		return ViewRef{}, fmt.Errorf("create wall: invalid identity %q", identity)
 	}
@@ -179,15 +190,40 @@ func CreateWall(identity string, shadows []ViewRef, width, height int) (ViewRef,
 	if err := Run("set-option", "-t", sessionID, viewOwnerOption, owner); err != nil {
 		return ViewRef{}, fmt.Errorf("tag wall %q: %w", name, err)
 	}
-	for _, shadow := range shadows[1:] {
-		if err := Run("split-window", "-t", sessionID, wallPaneCommand(shadow)); err != nil {
+	styleBestEffort("set-option", "-t", sessionID, "status", "off")
+	styleBestEffort("set-option", "-t", sessionID, "-w", "pane-border-status", "top")
+	styleBestEffort("set-option", "-t", sessionID, "-w", "pane-border-format", " #{pane_title} ")
+	styleBestEffort("set-option", "-t", sessionID, "-w", "pane-border-style", "fg="+borderDim)
+	styleBestEffort("set-option", "-t", sessionID, "-w", "pane-active-border-style", "fg="+borderAccent)
+	titleWallPane(sessionID, origins, 0)
+	for i := 1; i < len(shadows); i++ {
+		if err := Run("split-window", "-t", sessionID, wallPaneCommand(shadows[i])); err != nil {
 			return ref, fmt.Errorf("split wall %q: %w", name, err)
 		}
+		titleWallPane(sessionID, origins, i)
 	}
 	if err := Run("select-layout", "-t", sessionID, "tiled"); err != nil {
 		return ref, fmt.Errorf("layout wall %q: %w", name, err)
 	}
 	return ref, nil
+}
+
+// titleWallPane engraves one wall pane's currently active pane with its
+// member's origin name (law 3: the origin, never the shadow's gm-view-*
+// name). It is a no-op past the end of origins rather than an error — a
+// mismatched slice loses a title, not the wall.
+func titleWallPane(sessionID string, origins []string, i int) {
+	if i < 0 || i >= len(origins) {
+		return
+	}
+	styleBestEffort("select-pane", "-t", sessionID, "-T", origins[i])
+}
+
+// styleBestEffort fires one cosmetic tmux command and discards its result.
+// Every owned-chrome call funnels through here: law 2 makes styling failure
+// invisible by construction, not by scattered error-ignoring at call sites.
+func styleBestEffort(args ...string) {
+	_ = Run(args...)
 }
 
 // wallPaneCommand is one wall pane's shell command: a nested attach to an

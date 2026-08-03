@@ -10,7 +10,10 @@
 // settings-driven switch would need every color to become a lookup.
 package theme
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 var ansi = os.Getenv("GHOSTMUX_THEME") == "ansi"
 
@@ -27,3 +30,14 @@ func C(hex, ansi16 string) string {
 // ANSI reports whether the terminal-palette mode is active — for the one or
 // two places that render differently rather than just recolor.
 func ANSI() bool { return ansi }
+
+// Tmux converts one already-resolved C color to tmux's own spelling: hex
+// passes through unchanged, an ANSI-16 index (the "0".."15" lipgloss form)
+// becomes tmux's "colour<n>". Callers pass a color through here instead of
+// hand-converting so tmux styling never hardcodes the "colour" prefix.
+func Tmux(c string) string {
+	if strings.HasPrefix(c, "#") {
+		return c
+	}
+	return "colour" + c
+}
