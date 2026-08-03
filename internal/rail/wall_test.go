@@ -227,3 +227,57 @@ func TestWallDeparturesSettleAbsorbsRedraw(t *testing.T) {
 		t.Fatalf("departure settle did not absorb the wall's own redraw: %+v", m.activity)
 	}
 }
+
+// TestWallSwitchesGroupsWithoutToggle: v is "show me THIS group" — on the
+// walled group it closes, on a different group it switches directly, never
+// forcing a close-then-open double press.
+func TestWallSwitchesGroupsWithoutToggle(t *testing.T) {
+	vp := &fakeViewport{}
+	m := &railModel{
+		vp: vp, collapsed: map[string]bool{},
+		rows: []railRow{
+			{isGroup: true, label: "agents", sess: "agents"},
+			{depth: 1, flat: true, group: "agents", label: "ada", sess: "ada", window: "1"},
+			{isGroup: true, label: "dev", sess: "dev"},
+			{depth: 1, flat: true, group: "dev", label: "metro", sess: "metro", window: "1"},
+		},
+	}
+	m.toggleWall(m.rows[0]) // wall agents
+	if lock := vp.Lock(); !lock.Wall || lock.Sess != "agents" {
+		t.Fatalf("first v did not wall agents: %+v", lock)
+	}
+	m.toggleWall(m.rows[2]) // ONE press switches to dev
+	if lock := vp.Lock(); !lock.Wall || lock.Sess != "dev" {
+		t.Fatalf("v on another group did not switch: %+v", lock)
+	}
+	if len(m.walled) != 1 || m.walled[0] != "metro" {
+		t.Fatalf("walled set did not follow the switch: %v", m.walled)
+	}
+	m.toggleWall(m.rows[2]) // same group closes
+	if lock := vp.Lock(); lock.Wall || m.walled != nil {
+		t.Fatalf("v on the walled group did not close: %+v walled=%v", lock, m.walled)
+	}
+}
+
+// TestWallOrderFollowsGroupOrder: pane arrangement is the group's persisted
+// member order — J/K is the wall's layout editor, no second ordering exists.
+func TestWallOrderFollowsGroupOrder(t *testing.T) {
+	vp := &fakeViewport{}
+	rows := func(order ...string) []railRow {
+		out := []railRow{{isGroup: true, label: "g", sess: "g"}}
+		for _, name := range order {
+			out = append(out, railRow{depth: 1, flat: true, group: "g", label: name, sess: name, window: "1"})
+		}
+		return out
+	}
+	m := &railModel{vp: vp, collapsed: map[string]bool{}, rows: rows("b", "a", "c")}
+	members, _ := m.wallMembers("g")
+	if len(members) != 3 || members[0] != "b" || members[1] != "a" || members[2] != "c" {
+		t.Fatalf("wall order != group order: %v", members)
+	}
+	m.rows = rows("c", "b", "a") // a J/K reorder rebuilds rows in the new order
+	members, _ = m.wallMembers("g")
+	if members[0] != "c" || members[2] != "a" {
+		t.Fatalf("reorder did not change wall order: %v", members)
+	}
+}

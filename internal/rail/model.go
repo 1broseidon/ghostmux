@@ -834,13 +834,22 @@ func (m *railModel) toggleWall(r railRow) {
 	if m.vp == nil {
 		return
 	}
-	if m.vp.Lock().Wall {
+	// v is "show me THIS group": on the walled group it closes, on any other
+	// group it switches directly — never a blind toggle that makes the
+	// operator close one wall to open the next.
+	if lock := m.vp.Lock(); lock.Wall && r.isGroup && lock.Sess == r.label {
 		m.walled = nil
 		m.vp.Idle()
 		m.flashInfo("wall closed")
 		return
 	}
 	if !r.isGroup {
+		if m.vp.Lock().Wall {
+			m.walled = nil
+			m.vp.Idle()
+			m.flashInfo("wall closed")
+			return
+		}
 		m.flashInfo("v views a group")
 		return
 	}

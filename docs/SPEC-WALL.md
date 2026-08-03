@@ -33,9 +33,14 @@ sessions at once without hand-built plumbing; ghostmux alone has no panes.
    same acknowledgement path as a normal view. This is the panel-local
    truth "you saw it", recorded the way bell-ack already records it.
 4. **Enter stays fold.** Keyboard/mouse parity is law; a click on a group
-   folds and Enter must match. The wall is `v` only. `v` on a non-group
-   row flashes `v views a group` and does nothing.
-5. **Bounded honestly.** At most 6 members tile; more flashes
+   folds and Enter must match. The wall is `v` only. `v` is "show me THIS
+   group": on the walled group it closes, on any other group it switches
+   directly in one press — never a blind toggle. On a non-group row it
+   closes an open wall, else flashes `v views a group`.
+5. **Arrangement is the group's order.** Panes tile in the group's
+   persisted member order, so `J`/`K` — the existing reorder keys — are
+   the wall's layout editor. No second ordering mechanism exists.
+6. **Bounded honestly.** At most 6 members tile; more flashes
    `wall: first 6 of N`. No live members flashes `nothing to wall`. Caps
    are announced, never silent.
 
@@ -52,7 +57,8 @@ sessions at once without hand-built plumbing; ghostmux alone has no panes.
   3. Lock reports `Sess: group, Wall: true`. The rail records the walled
      member set for ledger acknowledgement and cursor-follow (the group
      header is the wall's row).
-- Teardown — `v` again (toggle), pointing at any row, `d`, quit, or heal
+- Teardown — `v` on the walled group (a different group switches in one
+  press), pointing at any row, `d`, quit, or heal
   finding the wall session gone — kills the wall session and retires every
   member shadow. Failed retirements go to the pending-retirement pool
   exactly as single views do today.
