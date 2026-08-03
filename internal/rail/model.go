@@ -145,6 +145,13 @@ type railModel struct {
 	lastViewed   viewRef // exact backend/session/window last followed by the cursor
 	currentView  viewRef // latest non-idle viewport session, including its window
 	previousView viewRef // prior backend-qualified session for the backtick toggle
+
+	// walled is the exact member set a `v` press composed into the current
+	// wall, raw session names — empty whenever the viewport is not walled.
+	// The rail keeps this record (rather than deriving it from ViewState,
+	// which only carries the group name) because it is what observeActivity
+	// needs to acknowledge each member's active window while walled (law 3).
+	walled []string
 }
 
 // Model is the rail's public face for composition: the solo frame embeds it
@@ -304,8 +311,13 @@ func (m railModel) updateNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewPrevious()
 	case "]":
 		m.returnOldest()
+	case "v":
+		if vis := m.visible(); m.cursor < len(vis) {
+			m.toggleWall(vis[m.cursor])
+		}
 	case "d":
 		m.vp.Detach()
+		m.walled = nil
 		m.flashInfo("viewport detached")
 		m.refresh()
 	case "n":
@@ -810,6 +822,78 @@ func (m *railModel) returnOldest() {
 	m.flashInfo("return · " + viewTargetName(target))
 }
 
+// wallMemberCap is the most sessions one wall tiles (law 5: bounded
+// honestly). More flashes the count rather than silently truncating.
+const wallMemberCap = 6
+
+// toggleWall is `v`: compose a group's live members into one tiled tmux
+// window, or — pressed again while any wall is up, regardless of which row
+// the cursor sits on — tear it down. Enter stays fold; this is the only key
+// that walls.
+func (m *railModel) toggleWall(r railRow) {
+	if m.vp == nil {
+		return
+	}
+	if m.vp.Lock().Wall {
+		m.walled = nil
+		m.vp.Idle()
+		m.flashInfo("wall closed")
+		return
+	}
+	if !r.isGroup {
+		m.flashInfo("v views a group")
+		return
+	}
+	members, total := m.wallMembers(r.label)
+	if total == 0 {
+		m.flashInfo("nothing to wall")
+		return
+	}
+	m.vp.PointWall(r.label, members)
+	lock := m.vp.Lock()
+	if !lock.Wall || lock.Sess != r.label {
+		m.flashError(errNamed("view unavailable"))
+		return
+	}
+	m.walled = members
+	m.followViewport()
+	if total > wallMemberCap {
+		m.flashInfo(fmt.Sprintf("wall: first %d of %d", wallMemberCap, total))
+		return
+	}
+	m.flashInfo("wall · " + r.label)
+}
+
+// wallMembers collects a group's fresh, non-ghost member session names from
+// the raw rows — fold-independent, like the return queue, because a folded
+// group is still a fleet — capped at wallMemberCap. total is the uncapped
+// count, so the caller can say how many were left out.
+func (m *railModel) wallMembers(group string) (capped []string, total int) {
+	for _, row := range m.rows {
+		if row.isGroup || row.isWin || row.group != group || row.ghost || row.validity != rowFresh {
+			continue
+		}
+		total++
+		if len(capped) < wallMemberCap {
+			capped = append(capped, row.sess)
+		}
+	}
+	return capped, total
+}
+
+// walledSet is m.walled as a lookup, for isViewed's per-window checks. Nil
+// when not walled, so isViewed's map read is always safe.
+func (m railModel) walledSet() map[string]bool {
+	if len(m.walled) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(m.walled))
+	for _, sess := range m.walled {
+		set[sess] = true
+	}
+	return set
+}
+
 // unreadPeekCap bounds one peek fetch. The COUNT is always exact (ledger
 // arithmetic); only the text is capped — a 5,000-line dump is not a peek.
 const unreadPeekCap = 200
@@ -1081,7 +1165,7 @@ func (m *railModel) rebuildRows() {
 	var rows []railRow
 	if m.tmuxCache.enabled && m.tmuxCache.hasSnapshot {
 		snapshot := m.tmuxCache.snapshot
-		rows = stampValidity(buildRows(m.hub, lock, snapshot.Sessions, snapshot.Windows), m.tmuxValidity())
+		rows = stampValidity(buildRows(m.hub, lock, m.walledSet(), snapshot.Sessions, snapshot.Windows), m.tmuxValidity())
 	}
 	m.rows = applyGroups(rows, groups, m.dirs, m.tmuxValidity())
 }
@@ -1116,10 +1200,17 @@ func (m railModel) backendStatus() string {
 func (m *railModel) healViewport() {
 	if m.vp == nil {
 		m.viewportDead, m.viewportErr = false, ""
+		m.walled = nil
 		return
 	}
 	dead, err := m.vp.Heal()
 	m.viewportDead = dead
+	if !m.vp.Lock().Wall {
+		// Heal may have found the wall session gone and idled on its own
+		// (crash residue). The ledger record follows that, not just the `v`
+		// key's own teardown path.
+		m.walled = nil
+	}
 	if err != nil {
 		m.viewportErr = err.Error()
 		return
@@ -1179,6 +1270,19 @@ func (m *railModel) followViewport() {
 		return
 	}
 	m.lastViewed = ref
+
+	if lock.Wall {
+		// The group header is the wall's row: there is no single member
+		// session to match against, only the group label ViewState.Sess
+		// carries while walled.
+		for i, r := range m.visible() {
+			if r.isGroup && r.label == lock.Sess {
+				m.cursor = i
+				return
+			}
+		}
+		return
+	}
 
 	best := -1
 	targetGroup := ""

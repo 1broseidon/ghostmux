@@ -21,7 +21,7 @@ func TestKeyHelpCoversBoundKeys(t *testing.T) {
 	// no longer dispatches on either. The table still documents them.
 	boundKeys := []string{
 		"q", "j", "k", "down", "up", "enter", "a", "m", "u", "J", "K", "n", "x", "S", "/", "d",
-		"h", "l", "right", "`", "]",
+		"h", "l", "right", "`", "]", "v",
 	}
 
 	var haystack strings.Builder
@@ -47,8 +47,8 @@ func TestKeyHelpCoversBoundKeys(t *testing.T) {
 			t.Errorf("bound key %q (needle %q) not documented in keyHelpTable", key, needle)
 		}
 	}
-	if len(keyHelpRows()) < 12 || len(keyHelpRows()) > 20 {
-		t.Errorf("keyHelpTable has %d entries, want a short operator set (12–20)", len(keyHelpRows()))
+	if len(keyHelpRows()) < 12 || len(keyHelpRows()) > 22 {
+		t.Errorf("keyHelpTable has %d entries, want a short operator set (12–22)", len(keyHelpRows()))
 	}
 }
 

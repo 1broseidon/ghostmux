@@ -66,6 +66,7 @@ These keys apply while the rail has focus. Press `?` in the panel for the comple
 | `` ` `` | Toggle back to the previous session and exact window. |
 | `]` | Return Queue: view the oldest unseen `●`/`✓` window. |
 | `[` | Peek the selected row's unseen output in a pager (`j/k` scroll, any other key closes). |
+| `v` | Wall a group: tile its live members into one tmux window. Pressed again, tears it down. |
 | `Ctrl+Alt+\` | Switch focus between rail and viewport. |
 | `n` | Create a tmux session. |
 | `a`, `m`, `J` / `K`, `u` | Create a group, preview an organization move, move immediately, or undo the last organization change. |
@@ -85,6 +86,8 @@ The Return Queue is orderable because tmux proves `#{window_activity}` per windo
 Agent rows state their evidence instead of a verb: while a window is producing output they draw a sparkline of its observed cadence (`claude ▂▅█▃▁` — eight 8-second buckets of tmux activity advances), and when every bucket is silent they show the quiet age (`claude 26m`). ghostmux will not claim an agent is "working" or "stuck" from evidence that cannot prove either — it draws the waveform and lets you read it. `ghostmux doctor` reports which agents are on `PATH` and whether Claude Code's bell hook is wired.
 
 Unread counts are line arithmetic, not content inspection: a pane's write position is `#{history_size} + #{cursor_y}`, banked only when the window's activity timestamp proves output happened (a resize reflow moves the totals without a byte being emitted and is absorbed). Viewing the window drains its bank; `[` captures the unseen tail lazily, capped at 200 lines with the cap named in the pager title. Full-screen programs are marked `TUI` in the peek because their line history under-describes them.
+
+`v` on a group header walls it: up to six live, non-ghost members tile into one real tmux window of split panes — ada | beastie | ifrit, side by side, live and interactive — with tmux itself owning navigation, mouse focus, and `prefix+z` zoom to one member and back. Each pane attaches a per-member shadow, never the member directly, so the wall never fights your other clients for window focus. More than six members walls the first six and says so (`wall: first 6 of N`); no live members flashes `nothing to wall`; `v` on anything but a group flashes `v views a group` and does nothing. While a group is walled, shadow display cannot clear its members' own attention flags — but the operator is looking at all of them, so the panel acknowledges every walled member's active window itself: their marks and unread counts drain exactly as a normal view's do, for as long as the wall is up. Pressed again, `v` tears the wall down and every member resizes back to whatever else is attached to it — that squeeze is tmux physics, not a bug. A crashed panel can leave an owned `gm-wall-*`/`gm-view-*` residue behind; ghostmux never sweeps it by name on the next launch, only by its exact ownership tag when a panel retires it.
 
 ## Making agents ring the queue
 

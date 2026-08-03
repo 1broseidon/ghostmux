@@ -17,6 +17,12 @@ const (
 	// session is an owned view only when its owner option matches its name.
 	ViewPrefix = "gm-view-"
 
+	// WallPrefix is reserved for the owned composite session a group wall
+	// creates. It is tagged with the exact same option and version as
+	// ViewPrefix shadows — only the prefix (and therefore the name) differs —
+	// so ownership, the predicate, and cleanup are shared unchanged.
+	WallPrefix = "gm-wall-"
+
 	viewOwnerOption  = "@ghostmux_view_owner"
 	viewOwnerVersion = "v1:"
 )
@@ -136,6 +142,113 @@ func AttachSessionArgv(sess, win string) []string {
 	return argv
 }
 
+// CreateWall creates and configures the owned composite session a group wall
+// tiles: one pane per member shadow, sized to the viewport. Ownership is
+// tagged immediately after creation and before any pane is split — the same
+// order CreateView uses — so a failure before the tag leaves nothing to
+// clean, and a later failure returns the tagged capability so its caller can
+// retain and retry ownership-checked cleanup. Panes run through wallPaneCommand,
+// never a direct attach: a direct attach to a member would join the user's
+// other clients and fight them for window focus.
+func CreateWall(identity string, shadows []ViewRef, width, height int) (ViewRef, error) {
+	if !validViewIdentity(identity) {
+		return ViewRef{}, fmt.Errorf("create wall: invalid identity %q", identity)
+	}
+	if len(shadows) == 0 {
+		return ViewRef{}, fmt.Errorf("create wall: no members")
+	}
+
+	name := WallPrefix + identity
+	owner := viewOwnerVersion + name
+	args := []string{"new-session", "-d", "-P", "-F", "#{session_id}", "-s", name}
+	if width > 0 && height > 0 {
+		args = append(args, "-x", strconv.Itoa(width), "-y", strconv.Itoa(height))
+	}
+	args = append(args, wallPaneCommand(shadows[0]))
+	out, err := Runner(args...)
+	if err != nil {
+		return ViewRef{}, fmt.Errorf("create wall %q: %w", name, err)
+	}
+
+	sessionID := strings.TrimSpace(out)
+	if !validSessionID(sessionID) {
+		return ViewRef{}, fmt.Errorf("create wall %q: invalid session id %q", name, sessionID)
+	}
+	ref := ViewRef{Name: name, SessionID: sessionID, Owner: owner}
+
+	if err := Run("set-option", "-t", sessionID, viewOwnerOption, owner); err != nil {
+		return ViewRef{}, fmt.Errorf("tag wall %q: %w", name, err)
+	}
+	for _, shadow := range shadows[1:] {
+		if err := Run("split-window", "-t", sessionID, wallPaneCommand(shadow)); err != nil {
+			return ref, fmt.Errorf("split wall %q: %w", name, err)
+		}
+	}
+	if err := Run("select-layout", "-t", sessionID, "tiled"); err != nil {
+		return ref, fmt.Errorf("layout wall %q: %w", name, err)
+	}
+	return ref, nil
+}
+
+// wallPaneCommand is one wall pane's shell command: a nested attach to an
+// owned member shadow via the same ownership-gated queue AttachViewArgv uses.
+// TMUX is cleared for this command only — the pane is a fresh top-level tmux
+// client composing into the wall, not evidence that it is already inside
+// itself. tmux always runs a multi-word shell-command through $SHELL -c, so
+// the fully quoted line is passed as a single trailing argument.
+func wallPaneCommand(ref ViewRef) string {
+	argv := AttachViewArgv(ref)
+	if len(argv) == 0 {
+		return ""
+	}
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		words[i] = wallShellQuote(a)
+	}
+	return "TMUX= " + strings.Join(words, " ")
+}
+
+func wallShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+// AttachWallArgv is AttachViewArgv's counterpart for the owned wall session:
+// the same ownership-gated predicate and destroy-unattached/attach ordering,
+// evaluated against WallPrefix instead of ViewPrefix.
+func AttachWallArgv(ref ViewRef) []string {
+	if !validWallRef(ref) {
+		return nil
+	}
+	attach := fmt.Sprintf(
+		"set-option -t '%s' destroy-unattached on ; attach-session -t '%s'",
+		ref.SessionID, ref.SessionID,
+	)
+	return append([]string{"tmux"}, Argv(
+		"if-shell", "-F", "-t", ref.SessionID,
+		ownedViewPredicate(ref), attach, "",
+	)...)
+}
+
+// KillWallIfOwned is KillViewIfOwned's counterpart for the owned wall
+// session: the same atomic ownership-checked conditional kill.
+func KillWallIfOwned(ref ViewRef) error {
+	if !validWallRef(ref) {
+		return nil
+	}
+	kill := fmt.Sprintf("kill-session -t '%s'", ref.SessionID)
+	return Run("if-shell", "-F", "-t", ref.SessionID, ownedViewPredicate(ref), kill, "")
+}
+
+// IsOwnedWall reports whether a queried session is the owned wall composite,
+// so the rail excludes it from the fleet exactly as it excludes gm-view-*
+// shadows: a prefix match alone is insufficient, untagged gm-wall-* names are
+// ordinary sessions.
+func IsOwnedWall(session Session) bool {
+	return strings.HasPrefix(session.Name, WallPrefix) &&
+		len(session.Name) > len(WallPrefix) &&
+		session.ViewOwner == viewOwnerVersion+session.Name
+}
+
 // IsOwnedView reports whether a queried session is ghostmux viewport plumbing.
 // A prefix match is intentionally insufficient: untagged and malformed legacy
 // gm-view-* sessions are ordinary visible sessions.
@@ -196,5 +309,13 @@ func validViewRef(ref ViewRef) bool {
 	return validSessionID(ref.SessionID) &&
 		strings.HasPrefix(ref.Name, ViewPrefix) &&
 		len(ref.Name) > len(ViewPrefix) &&
+		ref.Owner == viewOwnerVersion+ref.Name
+}
+
+// validWallRef mirrors validViewRef against WallPrefix instead of ViewPrefix.
+func validWallRef(ref ViewRef) bool {
+	return validSessionID(ref.SessionID) &&
+		strings.HasPrefix(ref.Name, WallPrefix) &&
+		len(ref.Name) > len(WallPrefix) &&
 		ref.Owner == viewOwnerVersion+ref.Name
 }

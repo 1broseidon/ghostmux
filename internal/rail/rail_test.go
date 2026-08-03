@@ -259,7 +259,7 @@ func TestTmuxSessionInstanceProvenanceReachesSessionAndWindowRows(t *testing.T) 
 		{Session: "alpha", SessionID: "$42", Index: "1", Name: "one", Active: true},
 		{Session: "alpha", SessionID: "$42", Index: "2", Name: "two"},
 	}
-	rows := buildRows("", ViewState{}, sessions, windows)
+	rows := buildRows("", ViewState{}, nil, sessions, windows)
 	if len(rows) != 3 {
 		t.Fatalf("rows = %+v", rows)
 	}
@@ -283,7 +283,7 @@ func TestOwnedShadowsHiddenButLegacyPrefixSessionsVisible(t *testing.T) {
 		{Session: "gm-view-malformed", Index: "1", Name: "zsh", Active: true},
 	}
 
-	rows := buildRows("", ViewState{}, sessions, windows)
+	rows := buildRows("", ViewState{}, nil, sessions, windows)
 	var names []string
 	for _, row := range rows {
 		names = append(names, row.sess)

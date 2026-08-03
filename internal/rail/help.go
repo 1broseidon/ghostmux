@@ -43,6 +43,7 @@ func keyHelpRows() []keyHelp {
 		{"`", "previous session"},
 		{"]", "oldest unseen ●/✓"},
 		{"[", "peek unseen output"},
+		{"v", "group wall"},
 		{toggleLabel, "rail ⇄ viewport"},
 		{"n", "new session"},
 		{"a", "new group"},

@@ -10,6 +10,7 @@ import (
 type ViewState struct {
 	Sess string
 	Win  string // "" = whole session (its active window)
+	Wall bool   // Sess names the walled group, not a session; Win is always ""
 }
 
 // Viewport is the seam between the rail's brain and whatever renders its
@@ -19,6 +20,11 @@ type Viewport interface {
 	// Point renders a tmux session (and window, if given); grouped attaches
 	// through a uniquely owned transient session group.
 	Point(sess, win string, grouped bool)
+	// PointWall composes up to the wall cap of fresh members into one tiled
+	// session, each pane attaching that member's owned shadow (never the
+	// original) exactly as a grouped Point does. Replaces any current
+	// child/view/wall first, like Point.
+	PointWall(group string, members []string)
 	// Idle renders the idle placeholder and drops the lock.
 	Idle()
 	// Detach is the `d` key: idle, and stay idle across heals.

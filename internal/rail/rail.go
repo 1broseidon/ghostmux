@@ -50,7 +50,7 @@ func cmdOnce(args []string) error {
 		if err != nil {
 			queryErrs = append(queryErrs, fmt.Errorf("tmux unavailable: %w", err))
 		} else {
-			rows = append(rows, buildRows("", ViewState{}, snapshot.Sessions, snapshot.Windows)...)
+			rows = append(rows, buildRows("", ViewState{}, nil, snapshot.Sessions, snapshot.Windows)...)
 		}
 	}
 	for _, r := range rows {

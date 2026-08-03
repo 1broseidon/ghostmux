@@ -273,7 +273,7 @@ func railRows(hub string, v ViewState) []railRow {
 	if err != nil {
 		return nil
 	}
-	return buildRows(hub, v, snapshot.Sessions, snapshot.Windows)
+	return buildRows(hub, v, nil, snapshot.Sessions, snapshot.Windows)
 }
 
 func stampValidity(rows []railRow, validity rowValidity) []railRow {
@@ -287,11 +287,11 @@ func stampValidity(rows []railRow, validity rowValidity) []railRow {
 // hub session the rail itself lives in (rendering the hub inside its own
 // viewport would be an infinite mirror). Session rows aggregate the single
 // highest-priority mark across their windows (mockup screen 2).
-func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.Window) []railRow {
+func buildRows(hub string, v ViewState, walled map[string]bool, sessions []tmux.Session, windows []tmux.Window) []railRow {
 	var rows []railRow
 	for _, s := range sessions {
-		if s.Name == hub || tmux.IsOwnedView(s) {
-			continue // exact owned shadows are viewport plumbing, not fleet
+		if s.Name == hub || tmux.IsOwnedView(s) || tmux.IsOwnedWall(s) {
+			continue // exact owned shadows/wall are viewport plumbing, not fleet
 		}
 		// "Attached" means attached ELSEWHERE: the viewport's own nested
 		// client doesn't count, or every viewed session would show ●.
@@ -326,14 +326,14 @@ func buildRows(hub string, v ViewState, sessions []tmux.Session, windows []tmux.
 				instanceID: s.SessionID, windowID: w.WindowID,
 				bell: w.Bell, done: w.Done, act: w.Activity,
 				activityAt: w.ActivityAt, unread: w.Unread, pulse: w.Pulse,
-				inView: isViewed(v, w.Session, w.Index, w.Active), cmd: cmd,
+				inView: isViewed(v, walled, w.Session, w.Index, w.Active), cmd: cmd,
 			}
 			suppressViewedMarks(&row)
 			rows = append(rows, row)
 			continue
 		}
 		for _, w := range sessWins {
-			inView := isViewed(v, w.Session, w.Index, w.Active)
+			inView := isViewed(v, walled, w.Session, w.Index, w.Active)
 			cmd := ""
 			if len(w.PaneCmds) > 0 {
 				cmd = w.PaneCmds[0]
@@ -441,13 +441,17 @@ func suppressViewedMarks(r *railRow) {
 }
 
 // isViewed reports whether the viewport is showing this window: either it is
-// the explicitly locked window, or the whole session is locked and this is its
-// active window.
-func isViewed(v ViewState, sess, window string, active bool) bool {
-	if v.Sess != sess {
-		return false
+// the explicitly locked window, the whole session is locked and this is its
+// active window, or — while walled — this session is one of the walled
+// members and this is its active window. Shadow display cannot clear the
+// origin winlink's flags natively, but the operator IS looking at every
+// walled member (law 3), so its active window counts as viewed the same way
+// a locked session's does.
+func isViewed(v ViewState, walled map[string]bool, sess, window string, active bool) bool {
+	if v.Sess == sess && (v.Win == window || (v.Win == "" && active)) {
+		return true
 	}
-	return v.Win == window || (v.Win == "" && active)
+	return v.Wall && active && walled[sess]
 }
 
 // paneKey identifies a single pane for command-transition tracking.

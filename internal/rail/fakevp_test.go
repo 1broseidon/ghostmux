@@ -15,6 +15,9 @@ type fakeViewport struct {
 	healErr      error
 	syncCalls    int
 	pointBlocked bool
+
+	walls       [][]string // one entry per PointWall call: group, then its members
+	wallBlocked bool
 }
 
 func (v *fakeViewport) Point(sess, win string, grouped bool) {
@@ -27,6 +30,17 @@ func (v *fakeViewport) Point(sess, win string, grouped bool) {
 	if win != "" {
 		tmux.SetDone(sess, win, false)
 	}
+}
+
+// PointWall records the call and, unless a test arms wallBlocked, publishes
+// the ViewState.Wall lock the rail checks after asking to wall.
+func (v *fakeViewport) PointWall(group string, members []string) {
+	v.walls = append(v.walls, append([]string{group}, members...))
+	if v.wallBlocked {
+		return
+	}
+	v.lock = ViewState{Sess: group, Wall: true}
+	v.grouped, v.detached = false, false
 }
 func (v *fakeViewport) Idle()               { v.lock = ViewState{} }
 func (v *fakeViewport) Detach()             { v.Idle(); v.detached = true }

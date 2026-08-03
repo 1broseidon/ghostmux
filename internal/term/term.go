@@ -365,6 +365,14 @@ func (w *Widget) Running() bool {
 	}
 }
 
+// Size returns the widget's current grid, for callers (like a group wall)
+// that must size a new tmux session to match before ever starting a child.
+func (w *Widget) Size() (cols, rows int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.cols, w.rows
+}
+
 // Resize resizes the emulator grid and the pty (the child sees SIGWINCH).
 func (w *Widget) Resize(cols, rows int) {
 	if cols < 1 {

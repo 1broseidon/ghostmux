@@ -464,6 +464,100 @@ if cap | grep -E "banker.*\+[0-9]+" >/dev/null; then
 else pass "unread: viewing drained the bank"; fi
 send "q"; sleep 0.5
 
+# --- wall: v composes a group's live members into one tiled tmux window ---
+# Self-contained: its own fixture sessions, its own state dir. Two members,
+# each with a distinct on-screen marker and a native bell so the section can
+# prove both the composition (both markers in one capture) and the
+# acknowledgement law (the wall drains marks it never natively could).
+tmux $TA kill-session -t zdriver 2>/dev/null
+tmux $TA kill-session -t crew1 2>/dev/null
+tmux $TA kill-session -t crew2 2>/dev/null
+tmux $TA new-session -d -s crew1 -x 80 -y 20
+tmux $TA new-session -d -s crew2 -x 80 -y 20
+tmux $TA new-session -d -s zdriver -x 120 -y 32
+WSTATE=$(mktemp -d)
+tmux $TA send-keys -t zdriver "XDG_STATE_HOME='$WSTATE' GHOSTMUX_TMUX_ARGS='$TA' $BIN" Enter
+sleep 2.5
+
+# Bell + marker land while nothing watches either member.
+tmux $TA send-keys -t crew1 "printf 'WALLMARK-ONE\\n\\a'" Enter
+tmux $TA send-keys -t crew2 "printf 'WALLMARK-TWO\\n\\a'" Enter
+sleep 1.5
+if cap | grep -E "crew1.*●" >/dev/null && cap | grep -E "crew2.*●" >/dev/null; then
+  pass "wall: fixture — both members carry an unseen bell before walling"
+else fail "wall: fixture bells missing"; cap | head -14; fi
+
+# Declare the group and move both fixtures into it.
+send "a"
+tmux $TA send-keys -t zdriver "crew"; sleep 0.5
+send "" Enter
+send "/"
+tmux $TA send-keys -t zdriver "crew1"; sleep 0.5
+send "" Enter
+send "g"
+send "j"
+send "K"
+send "Escape"
+send "/"
+tmux $TA send-keys -t zdriver "crew2"; sleep 0.5
+send "" Enter
+send "g"
+send "j"
+send "K"
+if cap | grep -q "crew1" && cap | grep -q "crew2"; then
+  pass "wall: fixture — both members grouped"
+else fail "wall: grouping fixture failed"; cap | head -14; fi
+
+# Cursor is on crew2's own row (the last move's target): v on a non-group row
+# does nothing but say so.
+send "v"
+if cap | grep -q "v views a group"; then pass "wall: v on a non-group row flashes and does nothing"
+else fail "wall: non-group v did not flash"; cap | tail -4; fi
+
+# h moves to the group header regardless of member order; v there walls it.
+send "h"
+send "Escape"
+send "v"
+if cap | grep -q "WALLMARK-ONE" && cap | grep -q "WALLMARK-TWO"; then
+  pass "wall: v shows both members' markers in one capture"
+else fail "wall: composed capture missing a marker"; cap | head -20; fi
+WALLSESS=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}' 2>/dev/null |
+  awk '$1 ~ /^gm-wall-/ && $2 == "v1:" $1 {print $1}' | head -1)
+if [ -n "$WALLSESS" ]; then pass "wall: an owned gm-wall- composite session exists while walled"
+else fail "wall: no owned gm-wall- session found"; tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}'; fi
+SHADOWCOUNT=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}' 2>/dev/null |
+  awk '$1 ~ /^gm-view-/ && $2 == "v1:" $1' | wc -l)
+if [ "$SHADOWCOUNT" -ge 2 ]; then pass "wall: an owned gm-view- shadow exists per member"
+else fail "wall: expected >=2 owned member shadows, found $SHADOWCOUNT"; fi
+
+if cap | grep -qE "crew1.*●" || cap | grep -qE "crew2.*●"; then
+  fail "wall: member bells survived walling"; cap | head -14
+else pass "wall: walling drained both members' marks"; fi
+
+# v again tears the wall down: no gm-wall or new gm-view sessions left, and
+# the members themselves are untouched.
+send "v"
+sleep 1.5
+if tmux $TA has-session -t "=$WALLSESS" 2>/dev/null; then
+  fail "wall: teardown left the composite session behind ($WALLSESS)"
+else pass "wall: teardown removed the composite session"; fi
+REMAINING=$(tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}' 2>/dev/null |
+  awk '$1 ~ /^gm-view-/ && $2 == "v1:" $1' | wc -l)
+if [ "$REMAINING" -eq 0 ]; then pass "wall: teardown removed every member shadow"
+else fail "wall: $REMAINING owned shadow(s) survived teardown"; tmux $TA list-sessions -F '#{session_name} #{@ghostmux_view_owner}'; fi
+if tmux $TA has-session -t =crew1 2>/dev/null && tmux $TA has-session -t =crew2 2>/dev/null; then
+  pass "wall: both members intact after teardown"
+else fail "wall: teardown killed a member session"; fi
+CREW1_TEXT=$(tmux $TA capture-pane -p -t crew1)
+CREW2_TEXT=$(tmux $TA capture-pane -p -t crew2)
+if echo "$CREW1_TEXT" | grep -q "WALLMARK-ONE" && echo "$CREW2_TEXT" | grep -q "WALLMARK-TWO"; then
+  pass "wall: members kept their content after teardown"
+else fail "wall: member content lost after teardown"; fi
+
+send "q"; sleep 0.5
+tmux $TA kill-session -t crew1 2>/dev/null
+tmux $TA kill-session -t crew2 2>/dev/null
+
 # --- theme: GHOSTMUX_THEME=ansi renders the panel in the terminal palette ---
 tmux $TA kill-session -t zdriver 2>/dev/null
 tmux $TA new-session -d -s zdriver -x 120 -y 32

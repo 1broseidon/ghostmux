@@ -118,6 +118,7 @@ func (m *railModel) observeActivity(windows []tmux.Window) {
 	if m.vp != nil {
 		lock = m.vp.Lock()
 	}
+	walled := m.walledSet()
 
 	type observation struct {
 		last   int64
@@ -136,7 +137,7 @@ func (m *railModel) observeActivity(windows []tmux.Window) {
 		if window.ActivityAt > value.last {
 			value.last = window.ActivityAt
 		}
-		value.viewed = value.viewed || isViewed(lock, window.Session, window.Index, window.Active)
+		value.viewed = value.viewed || isViewed(lock, walled, window.Session, window.Index, window.Active)
 		value.bell = value.bell || window.Bell
 		if value.pane == "" {
 			lines := 0
